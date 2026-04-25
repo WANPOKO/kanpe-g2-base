@@ -2,7 +2,7 @@
   "package_id": "com.philtullai.cue",
   "edition": "202601",
   "name": "Cue",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.10",
   "entrypoint": "index.html",
@@ -10,6 +10,13 @@
     {
       "name": "g2-microphone",
       "desc": "Captures the conversation around you to suggest responses on the glasses display. Audio is streamed to your personal Cloudflare Worker for transcription and never persisted by Cue. Mic is OFF by default and requires explicit per-session opt-in."
+    },
+    {
+      "name": "network",
+      "desc": "Sends audio + transcript context to your personal Cloudflare Worker (which proxies to Deepgram and your chosen LLM). Worker URL is set in phone-side settings. Replace the whitelist entry below with your own deployed Worker URL before running `npm run pack`.",
+      "whitelist": [
+        "https://your-cue-worker.example.workers.dev"
+      ]
     }
   ],
   "supported_languages": ["en"]

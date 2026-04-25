@@ -4,26 +4,28 @@
 
 A multi-mode conversation coach for Even Realities G2 smart glasses. Listens to the conversation, surfaces 2-3 suggested responses on the display in real time. Pick a mode (Date / Argue calm / Sales close / Sting / Listen well / Custom) to shape the suggestions. The app never speaks for you — it offers cues you say in your own voice.
 
-## Status: v0.1.0 (mock-mode demo, sideload-able)
+## Status: v0.2.0 (real STT + LLM via your Cloudflare Worker; mock fallback retained)
 
-This release scaffolds the full UX with **fake suggestions on a timer** so you can try the flow on real glasses without setting up any cloud services. Real Deepgram STT + LLM integration lands in v0.2.0+ via a personal Cloudflare Worker (same pattern Glance uses).
+If you've deployed the personal Worker (see `worker-template/README.md`) and pasted its URL + bearer token in phone settings, Cue streams audio over WebSocket → Deepgram for live transcription, and POSTs your rolling transcript to the Worker's `/suggest` endpoint for Claude Haiku LLM suggestions. If those settings are blank or the Worker is unreachable, Cue falls back to the v0.1.0 timer-driven mock suggestions so the app stays demonstrable.
 
 | Version | What's in it |
 |---|---|
-| **v0.1.0** *(current)* | Scaffold, mode picker, privacy opt-in, mic toggle, glasses UI, mock suggestion driver |
-| v0.2.0 *(planned)* | Real audio capture via `audioControl`, streamed to your Worker, transcribed by Deepgram. Captions visible on glasses. |
-| v0.3.0 *(planned)* | LLM suggestions per mode via Worker. The product, fully working. |
-| v0.4.0 *(planned)* | Mode cycle gesture, ring-tap-for-topics polish, edge cases. |
+| v0.1.0 | Scaffold, mode picker, privacy opt-in, mic toggle, glasses UI, mock suggestion driver |
+| **v0.2.0** *(current)* | Worker template (Deepgram WS proxy + `/suggest` Anthropic/OpenAI bridge), real audio capture via `audioControl`, transport layer, live captions, debounced LLM suggestions. Mock fallback preserved. |
+| v0.3.0 *(planned)* | Suggestion quality polish, retry/backoff, transcript trimming heuristics, end-of-utterance detection. |
+| v0.4.0 *(planned)* | Battery indicator, auto-pause, mode-specific UI tweaks, edge cases. |
 
-## How it works (current v0.1.0)
+## How it works (current v0.2.0)
 
-1. Open Cue from the Even Hub launcher on your phone.
-2. **Privacy notice** appears on first launch — read and accept (or decline) before the mic can be enabled.
-3. Pick a mode in the phone-side settings page.
-4. Put on the glasses, open Cue.
-5. Tap glasses to start the (mock) session — suggestions appear on a timer.
-6. Glasses double-tap when not micced = cycle mode. Ring double-tap during a session = "fresh topics" prompt (date mode).
-7. Glasses double-tap during a session = exit (also stops mic).
+1. **One-time** — deploy the personal Cloudflare Worker (see [`worker-template/README.md`](worker-template/README.md)). You get a `https://<sub>.workers.dev` URL and a `SHARED_SECRET` bearer.
+2. **Wire it to Cue** — paste both into phone-side settings. (Skip this step and Cue runs in mock mode.)
+3. Open Cue from the Even Hub launcher.
+4. **Privacy notice** appears on first launch — read and accept (or decline) before the mic can be enabled.
+5. Pick a mode in the phone-side settings page.
+6. Put on the glasses, open Cue. The idle screen shows `◉ live` if a Worker is configured, `◌ mock` otherwise.
+7. Tap glasses to start a session. With a Worker, audio streams to Deepgram and you'll see live transcript captions on glasses; suggestions arrive ~6s after each transcript update. Without a Worker, the timer-driven mock fires.
+8. Glasses double-tap when not micced = cycle mode. Ring double-tap during a session = "fresh topics" prompt (date / custom modes).
+9. Glasses double-tap during a session = exit (also stops mic).
 
 ## Privacy is a real feature, not boilerplate
 
@@ -82,17 +84,23 @@ npx evenhub-simulator --glow http://localhost:5176
 | File | Purpose |
 |---|---|
 | `src/main.ts` | Entry, state machine, phone settings UI, glasses render |
-| `src/even.ts` | Glasses bridge wrapper (text container, input routing) |
+| `src/even.ts` | Glasses bridge wrapper (text container, input routing, mic capture) |
+| `src/transport.ts` | Worker transport — WebSocket for audio + REST for suggestions |
 | `src/modes.ts` | Mode registry — id, label, glyph, system prompt, behavior flags |
-| `src/mock.ts` | v0.1.0 timer-driven canned suggestions for each mode |
+| `src/mock.ts` | Mock-mode timer-driven canned suggestions (fallback when Worker unset) |
 | `src/storage.ts` | Native `setLocalStorage` wrapper for mode + privacy + Worker config |
-| `tests/*.test.ts` | Vitest unit tests (10 passing) |
+| `worker-template/` | Cloudflare Worker source — Deepgram WS proxy + `/suggest` LLM bridge |
+| `tests/*.test.ts` | Vitest unit tests (17 passing) |
+| `scripts/regression.mjs` | Simulator-driven e2e flow check (mock-fallback path, 4/4) |
 
 ## Roadmap
 
-Full plan in `~/Documents/PhilsHome/ROADMAP.md` § "Plan: Cue". Highlights for v0.2+:
-- `audioControl(true)` capture + 250ms PCM chunks → Worker WebSocket
-- Deepgram streaming STT in Worker
-- Anthropic Claude Haiku for suggestions (per-mode system prompts)
-- "Custom" mode pulls user's prompt from storage
+Full plan in `~/Documents/PhilsHome/ROADMAP.md` § "Plan: Cue". Remaining for v0.3+:
+- Suggestion debounce/backoff tuning, end-of-utterance detection so suggestions arrive when there's a natural pause rather than on a fixed timer
+- Trim long transcripts more intelligently (currently last 1200 chars rolling window)
 - Battery measurement + auto-pause after N min idle
+- Per-mode glance-friendly UI tweaks (line wrap, font emphasis on imperative verbs)
+
+## Packaging note
+
+The Worker URL is per-user (each deployer gets their own `*.workers.dev` subdomain). Before running `npm run pack`, replace `https://your-cue-worker.example.workers.dev` in `app.json`'s `permissions[].whitelist` with your own Worker URL — otherwise the WebView in the packaged build will block the request.

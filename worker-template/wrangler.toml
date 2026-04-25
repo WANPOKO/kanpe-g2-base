@@ -1,0 +1,13 @@
+name = "cue-worker"
+main = "index.ts"
+compatibility_date = "2024-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Set via wrangler secret (NOT in this file):
+#   wrangler secret put SHARED_SECRET
+#   wrangler secret put DEEPGRAM_API_KEY
+#   wrangler secret put ANTHROPIC_API_KEY        (preferred — Claude Haiku is fast + cheap)
+#   wrangler secret put OPENAI_API_KEY            (fallback if no Anthropic key)
+#
+# SHARED_SECRET goes into the Cue plugin settings page as "Bearer token".
+# Pick a long random string (32+ chars).

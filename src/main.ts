@@ -24,6 +24,7 @@ import {
   setWorkerToken,
   setWorkerUrl,
 } from './storage'
+import { createTransport, type CueTransport, type TranscriptEvent } from './transport'
 
 // --- module state ---
 
@@ -39,6 +40,18 @@ let mockTimer: number | null = null
 // Honest cadence for v0.1.0 mock mode. v0.2.0+ replaces the timer with
 // real STT-driven triggers (silence detection, partial-transcript pulses).
 const MOCK_TICK_MS = 8_000
+
+// Real-mode tuning — when Worker is configured.
+// - request a fresh suggestion every N seconds of new transcript
+const SUGGEST_DEBOUNCE_MS = 6_000
+// - sliding transcript window we send to the LLM (tail of last N chars)
+const TRANSCRIPT_WINDOW_CHARS = 1200
+
+let transport: CueTransport | null = null
+let isRealMode = false // true when transport.ready (Worker configured)
+let liveTranscript = '' // accumulated final transcripts
+let lastSuggestionAt = 0
+let suggestionInFlight = false
 
 // --- DOM scaffold (phone-side) ---
 
@@ -180,6 +193,7 @@ function renderGlasses(): string {
       `Mode: ${mode.label}`,
       mode.description.length > 64 ? trunc(mode.description, 64) : mode.description,
       '',
+      `${isRealMode ? '◉ live' : '◌ mock'} ready`,
       '[tap] start mic',
       '[2x] cycle mode',
     ].join('\n')
@@ -258,18 +272,96 @@ async function showProactiveTopics(): Promise<void> {
 async function toggleMic(): Promise<void> {
   if (!agreedToPrivacy) return
   micOn = !micOn
+  suggestions = []
+  lastTranscript = ''
+  liveTranscript = ''
+  proactiveActive = false
   if (micOn) {
-    resetMock()
-    suggestions = []
-    lastTranscript = ''
-    startMockTimer()
+    if (isRealMode && transport && even) {
+      await startRealSession()
+    } else {
+      resetMock()
+      startMockTimer()
+    }
   } else {
     stopMockTimer()
-    suggestions = []
-    lastTranscript = ''
-    proactiveActive = false
+    if (transport) await transport.endMicSession()
+    if (even) await even.stopMic()
   }
   await paint()
+}
+
+// --- real (Worker-backed) session ---
+
+async function startRealSession(): Promise<void> {
+  if (!transport || !even) return
+  liveTranscript = ''
+  lastSuggestionAt = 0
+  try {
+    await transport.startMicSession(onTranscriptFrame, msg => {
+      // Connection error — surface as a visible message and fall back
+      // to mock so the user still gets something.
+      lastTranscript = `(transport: ${msg})`
+      isRealMode = false
+      resetMock()
+      startMockTimer()
+      void paint()
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    lastTranscript = `(WS open failed: ${msg.slice(0, 40)})`
+    isRealMode = false
+    resetMock()
+    startMockTimer()
+    return
+  }
+  // Now ask the SDK to start the mic. PCM frames flow into onAudioFrame.
+  const ok = await even.startMic(frame => {
+    transport?.sendAudioFrame(frame)
+  })
+  if (!ok) {
+    lastTranscript = '(mic permission denied)'
+    isRealMode = false
+    await transport.endMicSession()
+    resetMock()
+    startMockTimer()
+  }
+}
+
+function onTranscriptFrame(e: TranscriptEvent): void {
+  // Show the latest interim transcript to the user. On final, append to
+  // the rolling window we send to the LLM.
+  lastTranscript = e.text
+  if (e.isFinal) {
+    liveTranscript = `${liveTranscript} ${e.text}`.slice(-TRANSCRIPT_WINDOW_CHARS).trim()
+    void maybeRequestSuggestions()
+  }
+  void paint()
+}
+
+async function maybeRequestSuggestions(): Promise<void> {
+  if (!transport || !isRealMode) return
+  if (suggestionInFlight) return
+  if (Date.now() - lastSuggestionAt < SUGGEST_DEBOUNCE_MS) return
+  if (liveTranscript.length < 16) return // too short to be useful
+  suggestionInFlight = true
+  lastSuggestionAt = Date.now()
+  try {
+    const customPrompt = currentMode === 'custom' ? await getCustomPrompt() : undefined
+    const result = await transport.requestSuggestions({
+      mode: currentMode,
+      transcript: liveTranscript,
+      customPrompt,
+    })
+    if (result.ok) {
+      suggestions = result.suggestions
+    } else {
+      suggestions = [`(LLM error: ${result.error.slice(0, 40)})`]
+    }
+    await paint()
+  } finally {
+    suggestionInFlight = false
+  }
 }
 
 async function cycleMode(): Promise<void> {
@@ -340,14 +432,21 @@ saveCustomBtn.addEventListener('click', async () => {
 saveWorkerBtn.addEventListener('click', async () => {
   await setWorkerUrl(workerUrlInput.value)
   await setWorkerToken(workerTokenInput.value)
+  // Re-initialize transport so the next mic session uses the new config.
+  transport = createTransport(workerUrlInput.value.trim(), workerTokenInput.value.trim())
+  isRealMode = transport.ready
   workerStatus.style.color = '#2a2'
-  workerStatus.textContent = 'Saved. Used in v0.2.0+ when real STT/LLM lands.'
+  workerStatus.textContent = isRealMode
+    ? 'Saved. Real STT + LLM active on next mic session.'
+    : 'Saved (URL + token incomplete — mock mode will run).'
   window.setTimeout(() => { workerStatus.textContent = '' }, 4000)
 })
 
 // --- bootstrap ---
 
 async function bootstrap(): Promise<void> {
+  // eslint-disable-next-line no-console
+  console.log('[cue] bootstrap start')
   status.textContent = 'Connecting to glasses…'
   even = await connectEvenRuntime(`Cue v${__APP_VERSION__}\n\nLoading…`)
 
@@ -357,12 +456,27 @@ async function bootstrap(): Promise<void> {
 
   // Hydrate state.
   agreedToPrivacy = await hasAgreedToPrivacy()
+  // In dev mode (Vite dev server), auto-accept the privacy gate so the
+  // simulator regression test and developer workflow aren't blocked by
+  // the phone-side modal. Production .ehpk installs run with
+  // import.meta.env.DEV === false and require explicit user opt-in.
+  if (!agreedToPrivacy && import.meta.env.DEV) {
+    agreedToPrivacy = true
+    await setPrivacyAgreed()
+    // eslint-disable-next-line no-console
+    console.log('[cue:state] dev-mode auto-accepted privacy (production requires real opt-in)')
+  }
   const persistedMode = await getMode()
   if (persistedMode) currentMode = persistedMode
   customPromptInput.value = await getCustomPrompt()
-  workerUrlInput.value = await getWorkerUrl()
-  workerTokenInput.value = await getWorkerToken()
-
+  const wUrl = await getWorkerUrl()
+  const wTok = await getWorkerToken()
+  workerUrlInput.value = wUrl
+  workerTokenInput.value = wTok
+  // Set up transport if both Worker URL + token are configured. If they're
+  // unset or change later, mock mode runs.
+  transport = createTransport(wUrl, wTok)
+  isRealMode = transport.ready
   renderModeList()
 
   if (!agreedToPrivacy) {
@@ -385,4 +499,7 @@ async function bootstrap(): Promise<void> {
   await paint()
 }
 
-void bootstrap()
+void bootstrap().catch(err => {
+  // eslint-disable-next-line no-console
+  console.error('[cue] bootstrap threw:', err?.message ?? err, err?.stack)
+})

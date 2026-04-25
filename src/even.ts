@@ -12,6 +12,12 @@ import {
   waitForEvenAppBridge,
 } from '@evenrealities/even_hub_sdk'
 
+// Audio frame from the SDK's mic capture. Per the SDK README, audio comes
+// as PCM bytes — assumed 16kHz mono 16-bit little-endian (industry-standard
+// BLE voice format). Verify on real glasses; if it differs, adjust the
+// Deepgram URL in worker-template/index.ts.
+export type AudioFrame = Uint8Array
+
 const MAIN_ID = 1
 const MAIN_NAME = 'main'
 const BRIDGE_TIMEOUT_MS = 4000
@@ -27,6 +33,10 @@ export interface EvenRuntime {
   onSwipe: (handler: (dir: SwipeDir, source: InputSource) => void) => void
   onDoubleTap: (handler: (source: InputSource) => void) => void
   onForeground: (handler: () => void) => void
+  // Mic capture. Calling startMic emits PCM frames to the registered handler
+  // until stopMic. Caller is responsible for routing frames to STT.
+  startMic: (handler: (frame: AudioFrame) => void) => Promise<boolean>
+  stopMic: () => Promise<void>
   exitApp: () => Promise<void>
   getStorage: (key: string) => Promise<string>
   setStorage: (key: string, value: string) => Promise<boolean>
@@ -86,6 +96,7 @@ export async function connectEvenRuntime(initial: string): Promise<EvenRuntime |
   let swipeHandler: ((dir: SwipeDir, source: InputSource) => void) | null = null
   let doubleTapHandler: ((source: InputSource) => void) | null = null
   let foregroundHandler: (() => void) | null = null
+  let audioHandler: ((frame: AudioFrame) => void) | null = null
 
   function classifySource(src: number | undefined): InputSource {
     if (src === EventSourceType.TOUCH_EVENT_FROM_RING) return 'ring'
@@ -99,6 +110,15 @@ export async function connectEvenRuntime(initial: string): Promise<EvenRuntime |
   }
 
   bridge.onEvenHubEvent(event => {
+    // Audio frames are pushed via the same onEvenHubEvent channel —
+    // SDK 0.0.10 wraps them as `audioEvent.audioPcm: Uint8Array`. We
+    // hand the raw bytes to the registered handler; transport layer
+    // is responsible for shaping into Deepgram's expected encoding.
+    const audioEvent = (event as { audioEvent?: { audioPcm?: Uint8Array } }).audioEvent
+    if (audioEvent?.audioPcm && audioHandler) {
+      audioHandler(audioEvent.audioPcm)
+      return
+    }
     if (event.textEvent) {
       const t = event.textEvent.eventType ?? 0
       if (t === OsEventTypeList.SCROLL_TOP_EVENT) swipeHandler?.('up', 'unknown')
@@ -135,6 +155,20 @@ export async function connectEvenRuntime(initial: string): Promise<EvenRuntime |
     onSwipe(h) { swipeHandler = h },
     onDoubleTap(h) { doubleTapHandler = h },
     onForeground(h) { foregroundHandler = h },
+    async startMic(handler) {
+      audioHandler = handler
+      try {
+        const ok = await bridge.audioControl(true)
+        return !!ok
+      } catch {
+        audioHandler = null
+        return false
+      }
+    },
+    async stopMic() {
+      audioHandler = null
+      try { await bridge.audioControl(false) } catch { /* ignore */ }
+    },
     async exitApp(): Promise<void> { await bridge.shutDownPageContainer(1) },
     async getStorage(key) {
       try { return await bridge.getLocalStorage(key) } catch { return '' }
