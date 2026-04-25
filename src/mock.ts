@@ -1,0 +1,163 @@
+// Mock suggestion driver — generates fake transcript snippets and per-mode
+// suggestions on a timer. Lets v0.1.0 ship a usable demo without requiring
+// the user to deploy a Worker, supply API keys, or actually record audio.
+//
+// Real audio + STT + LLM pipeline lands in v0.2.0/v0.3.0 (see ROADMAP).
+
+import type { ModeId } from './modes'
+
+interface MockEntry {
+  transcript: string // what "she" supposedly just said
+  suggestionsByMode: Partial<Record<ModeId, string[]>>
+}
+
+// A small ring of plausible exchanges. Cycle on each tick. Designed to be
+// mode-agnostic on the transcript side; the suggestions vary per mode.
+const SCRIPT: MockEntry[] = [
+  {
+    transcript: 'I started painting again last weekend after years off.',
+    suggestionsByMode: {
+      date: [
+        'What pulled you back to it?',
+        'Watercolor or oils these days?',
+        'Where do you paint — a studio?',
+      ],
+      'argue-calm': [
+        'I love that you found it again.',
+        'That sounds like it meant a lot.',
+      ],
+      'sales-close': [
+        'Has anything been getting in the way of more time on it?',
+      ],
+      sting: [
+        'Welcome back to the canvas trenches.',
+        'Bob Ross is shaking with pride.',
+      ],
+      listen: [
+        'It sounds like you missed it.',
+        'Tell me more about coming back to it.',
+      ],
+    },
+  },
+  {
+    transcript: "I don't know, work has been really overwhelming lately.",
+    suggestionsByMode: {
+      date: [
+        "What's been the toughest part?",
+        'Have you had any chance to unwind?',
+        'Is it project-driven or constant?',
+      ],
+      'argue-calm': [
+        "That sounds heavy. What's weighing the most?",
+        'I hear you. I want to help where I can.',
+      ],
+      'sales-close': [
+        "I've worked with teams in similar spots — what tools are you using now?",
+      ],
+      sting: [
+        'Have you tried turning the job off and on again?',
+      ],
+      listen: [
+        "It sounds like work has been a lot lately.",
+        'Tell me more about what overwhelming looks like.',
+      ],
+    },
+  },
+  {
+    transcript: 'I think I want to take a sabbatical and travel for a few months.',
+    suggestionsByMode: {
+      date: [
+        'Where would you go first?',
+        'Have you been planning this for a while?',
+        'What got you thinking about it now?',
+      ],
+      'argue-calm': [
+        "That's a big step — what's drawing you to it?",
+        'I want to understand what you need from this.',
+      ],
+      'sales-close': [
+        "What would make this the right time vs. waiting?",
+      ],
+      sting: [
+        'Bold move. Try not to come back with a tattoo of yourself.',
+      ],
+      listen: [
+        'It sounds like you really need a break.',
+        'Tell me more about what you imagine doing.',
+      ],
+    },
+  },
+  {
+    transcript: "I can't believe it's already been six months.",
+    suggestionsByMode: {
+      date: [
+        'What stands out most from these past months?',
+        'Time flies when… well, when does it not?',
+        "Where do you see things going from here?",
+      ],
+      'argue-calm': [
+        'A lot has happened. How are you feeling about it?',
+        "I've been thinking about that too.",
+      ],
+      'sales-close': [
+        "Looking back at six months — what's worked, what hasn't?",
+      ],
+      sting: [
+        'Time really doesn\'t care, does it.',
+      ],
+      listen: [
+        'It sounds like a lot has happened in those months.',
+        'Tell me more about what you mean by that.',
+      ],
+    },
+  },
+]
+
+const PROACTIVE_TOPICS_BY_MODE: Partial<Record<ModeId, string[][]>> = {
+  date: [
+    [
+      'Ask: a movie that surprised you lately?',
+      'Ask: any travel coming up?',
+      'Ask: what does your perfect Sunday look like?',
+    ],
+    [
+      'Ask: best meal you\'ve had this year?',
+      'Ask: ever picked up a weird hobby?',
+      'Ask: childhood obsession that stuck around?',
+    ],
+  ],
+  custom: [
+    [
+      'Ask the other person an open-ended question.',
+      'Share a small detail from your day.',
+    ],
+  ],
+}
+
+let scriptIdx = 0
+let proactiveIdx = 0
+
+export function nextMockExchange(mode: ModeId): { transcript: string; suggestions: string[] } {
+  const entry = SCRIPT[scriptIdx % SCRIPT.length]!
+  scriptIdx += 1
+  const suggestions =
+    entry.suggestionsByMode[mode] ??
+    entry.suggestionsByMode.date ?? // fall back to date-mode suggestions
+    ['(no suggestions configured for this mode)']
+  return { transcript: entry.transcript, suggestions }
+}
+
+export function nextMockProactiveTopics(mode: ModeId): string[] {
+  const list = PROACTIVE_TOPICS_BY_MODE[mode]
+  if (!list || list.length === 0) {
+    return ['(proactive topics not available in this mode)']
+  }
+  const topics = list[proactiveIdx % list.length]!
+  proactiveIdx += 1
+  return topics
+}
+
+export function resetMock(): void {
+  scriptIdx = 0
+  proactiveIdx = 0
+}
