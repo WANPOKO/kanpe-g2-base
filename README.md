@@ -95,7 +95,7 @@ npx evenhub-simulator --glow http://localhost:5176
 
 ## Roadmap
 
-Full plan in `~/Documents/PhilsHome/ROADMAP.md` § "Plan: Cue". Remaining for v0.3+:
+Full plan in `~/Documents/Pulse/ROADMAP.md` § "Plan: Cue". Remaining for v0.3+:
 - Suggestion debounce/backoff tuning, end-of-utterance detection so suggestions arrive when there's a natural pause rather than on a fixed timer
 - Trim long transcripts more intelligently (currently last 1200 chars rolling window)
 - Battery measurement + auto-pause after N min idle

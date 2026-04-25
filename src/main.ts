@@ -6,7 +6,7 @@
 // timer using a small canned script, just to demonstrate the UX.
 //
 // v0.2.0+ (planned): real Deepgram STT via Worker, real LLM via Worker.
-// See ~/Documents/PhilsHome/ROADMAP.md § "Plan: Cue".
+// See ~/Documents/Pulse/ROADMAP.md § "Plan: Cue".
 
 import { connectEvenRuntime, type EvenRuntime, type InputSource, type SwipeDir } from './even'
 import { DEFAULT_MODE, MODES, type Mode, type ModeId, modeById, nextMode } from './modes'
