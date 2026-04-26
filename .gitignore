@@ -22,6 +22,10 @@ dist-ssr
 # Page HTML dump from a failed deploy-portal.mjs run — for selector debugging
 .deploy-portal-failure.html
 
+# Output of scripts/inspect-portal.mjs — page snapshot for selector tuning
+inspect-portal.out
+inspect-portal.summary.txt
+
 # Regression test screenshots — regenerated each run
 tests/screenshots-regression/
 
