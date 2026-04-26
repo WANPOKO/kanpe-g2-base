@@ -17,6 +17,7 @@
     "test:watch": "vitest",
     "test:e2e": "node scripts/regression.mjs",
     "test:worker": "cd worker-template && node scripts/test-worker.mjs",
+    "test:webkit": "node scripts/test-webkit.mjs",
     "test:all": "npm run test && npm run lint:app-json"
   },
   "devDependencies": {
