@@ -19,6 +19,9 @@ dist-ssr
 # don't have to log in on every upload. NEVER commit this file.
 .even-portal-session.json
 
+# Page HTML dump from a failed deploy-portal.mjs run — for selector debugging
+.deploy-portal-failure.html
+
 # Regression test screenshots — regenerated each run
 tests/screenshots-regression/
 

@@ -11,33 +11,42 @@
 // path from the first .ehpk in repo root (or --file). Same script works
 // for Cue, Pulse, Glance, lyrics-glow without per-app forks.
 //
-// First-time setup (run once per dev machine):
-//   npm install --save-dev playwright
-//   npx playwright install chromium                  # ~150 MB one-time
+// ─── Two modes ─────────────────────────────────────────────────────────
 //
-// First-time login:
-//   node scripts/deploy-portal.mjs                   # opens visible browser
-//   → log into hub.evenrealities.com manually in that window
-//   → press Enter back in the terminal when you're at the portal
-//   → cookies saved to .even-portal-session.json (gitignored)
-//   → all subsequent runs reuse the session
+// Default — Fresh Playwright Chromium with cached session
+// ────────────────────────────────────────────────────────
+//   First-time:  npm install --save-dev playwright
+//                npx playwright install chromium                  # ~150 MB
+//                node scripts/deploy-portal.mjs                   # log in, save session
+//   Subsequent:  node scripts/deploy-portal.mjs                   # auto-uses session
+//                node scripts/deploy-portal.mjs --headless        # CI
 //
-// Usage:
-//   node scripts/deploy-portal.mjs                   # uploads ./<package-id-suffix>.ehpk
-//   node scripts/deploy-portal.mjs path/to/x.ehpk    # explicit file
-//   node scripts/deploy-portal.mjs --headless        # CI-friendly (after first login)
+// --attach — Connect to your existing Chrome via CDP
+// ───────────────────────────────────────────────────
+//   Relaunch Chrome with debug port:
+//     open -a "Google Chrome" --args --remote-debugging-port=9222
+//   Then in Chrome, navigate to the portal page and log in (or already-logged-in).
+//   Then run:
+//     node scripts/deploy-portal.mjs --attach
+//   The script picks the existing tab matching the portal URL, drives the
+//   upload flow, leaves your tabs intact when done.
 //
-// Selector audit: the SPA's DOM changes occasionally. Each `// SELECTOR:`
-// comment below marks a click site to inspect via DevTools if the run
-// breaks. Update inline and commit.
+// ─── Iterating on selectors ───────────────────────────────────────────
+//
+// On any failure the script dumps the current page HTML to
+// `.deploy-portal-failure.html` so you can grep for the right selector
+// and update the SELECTOR comments inline. The portal is an SPA whose DOM
+// changes occasionally; expect to re-audit every few months.
 
 import { chromium } from 'playwright'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const PORTAL_BASE = 'https://hub.evenrealities.com'
-const STORAGE_STATE = '.even-portal-session.json' // gitignored
+const STORAGE_STATE = '.even-portal-session.json'
 const APP_JSON = 'app.json'
+const CDP_ENDPOINT = 'http://localhost:9222'
+const FAILURE_DUMP = '.deploy-portal-failure.html'
 
 if (!existsSync(APP_JSON)) {
   console.error(`✗ ${APP_JSON} not found — run from your app's repo root.`)
@@ -45,13 +54,16 @@ if (!existsSync(APP_JSON)) {
 }
 const appJson = JSON.parse(readFileSync(APP_JSON, 'utf-8'))
 const packageId = appJson.package_id
+const appVersion = appJson.version
 if (!packageId) {
   console.error(`✗ ${APP_JSON} has no package_id field.`)
   process.exit(1)
 }
 
 const args = process.argv.slice(2)
+const attach = args.includes('--attach')
 const headless = args.includes('--headless')
+const verbose = args.includes('--verbose') || args.includes('-v')
 const ehpkArg = args.find(a => a.endsWith('.ehpk'))
 const ehpkPath = ehpkArg
   ? resolve(ehpkArg)
@@ -63,78 +75,190 @@ if (!existsSync(ehpkPath)) {
   process.exit(1)
 }
 
+// Best-effort dump on any failure so we can update selectors. Always called
+// before throwing so the next run has fresh DOM to inspect.
+async function dumpFailure(page, where, err) {
+  try {
+    const html = await page.content()
+    writeFileSync(FAILURE_DUMP, `<!-- failed at: ${where} -->\n<!-- error: ${err?.message ?? err} -->\n${html}`)
+    console.error(`  page HTML dumped to ${FAILURE_DUMP} (${(html.length / 1024).toFixed(0)} KB)`)
+    console.error('  inspect this file, find the right selector, update the matching SELECTOR comment in scripts/deploy-portal.mjs')
+  } catch (dumpErr) {
+    console.error(`  (also failed to dump page: ${dumpErr?.message ?? dumpErr})`)
+  }
+}
+
 async function main() {
-  console.log(`→ App      ${packageId}`)
+  console.log(`→ App      ${packageId} v${appVersion}`)
   console.log(`  File     ${ehpkPath}`)
-  console.log(`  Headless ${headless}`)
-  const browser = await chromium.launch({ headless })
-  const context = existsSync(STORAGE_STATE)
-    ? await browser.newContext({ storageState: STORAGE_STATE })
-    : await browser.newContext()
-  const page = await context.newPage()
+  console.log(`  Mode     ${attach ? 'attach (CDP)' : headless ? 'fresh-headless' : 'fresh-headed'}`)
 
-  // 1. Land on portal — if not logged in, we'll get bounced.
-  await page.goto(`${PORTAL_BASE}/application/${packageId}`, { waitUntil: 'networkidle' }).catch(() => {})
+  let browser
+  let context
+  let page
+  let ownsBrowser = true
 
-  // 2. Detect login state. We assume the URL keeps `/application/<id>` once
-  // logged in; anything else means we got bounced to login.
-  const onAppPage = () => page.url().includes(`/application/${packageId}`)
-  if (!onAppPage()) {
-    if (headless) {
-      console.error('✗ --headless cannot be used for first login. Re-run without --headless.')
+  if (attach) {
+    try {
+      browser = await chromium.connectOverCDP(CDP_ENDPOINT)
+    } catch (err) {
+      console.error(`✗ Could not connect to Chrome at ${CDP_ENDPOINT}: ${err.message}`)
+      console.error('  Quit Chrome and relaunch with:')
+      console.error('    open -a "Google Chrome" --args --remote-debugging-port=9222')
+      console.error('  then re-run this script.')
       process.exit(2)
     }
-    console.log('  No saved session — log into the portal manually in the open window.')
-    console.log('  Once you reach the application page, return here and press Enter.')
-    await waitForEnter()
-    await context.storageState({ path: STORAGE_STATE })
-    console.log(`  Session saved to ${STORAGE_STATE}`)
-    if (!onAppPage()) {
-      await page.goto(`${PORTAL_BASE}/application/${packageId}`, { waitUntil: 'networkidle' })
+    ownsBrowser = false
+    // Reuse the first existing context (which has the user's cookies + tabs).
+    context = browser.contexts()[0] ?? (await browser.newContext())
+    // Find an existing tab on the portal first; otherwise open a new one.
+    const portalUrl = `${PORTAL_BASE}/application/${packageId}`
+    page = context.pages().find(p => p.url().includes('hub.evenrealities.com'))
+    if (page) {
+      console.log(`  Found existing tab: ${page.url()}`)
+      if (!page.url().includes(packageId)) {
+        await page.goto(portalUrl, { waitUntil: 'networkidle' })
+      }
+    } else {
+      console.log('  No existing portal tab — opening one.')
+      page = await context.newPage()
+      await page.goto(portalUrl, { waitUntil: 'networkidle' })
+    }
+  } else {
+    browser = await chromium.launch({ headless })
+    context = existsSync(STORAGE_STATE)
+      ? await browser.newContext({ storageState: STORAGE_STATE })
+      : await browser.newContext()
+    page = await context.newPage()
+    await page.goto(`${PORTAL_BASE}/application/${packageId}`, { waitUntil: 'networkidle' }).catch(() => {})
+
+    if (!page.url().includes(`/application/${packageId}`)) {
+      if (headless) {
+        console.error('✗ --headless cannot be used for first login. Re-run without --headless.')
+        process.exit(2)
+      }
+      console.log('  No saved session — log into the portal manually in the open window.')
+      console.log('  Once you reach the application page, return here and press Enter.')
+      await waitForEnter()
+      await context.storageState({ path: STORAGE_STATE })
+      console.log(`  Session saved to ${STORAGE_STATE}`)
+      if (!page.url().includes(`/application/${packageId}`)) {
+        await page.goto(`${PORTAL_BASE}/application/${packageId}`, { waitUntil: 'networkidle' })
+      }
     }
   }
 
-  // 3. Open the upload UI. The portal usually has an "Upload new version" or
-  // "+ Upload" button on the application page.
-  // SELECTOR: upload-trigger button. Try multiple text variants — update
-  // after first inspection if the portal renames anything.
-  const uploadBtn = page
-    .locator('button:has-text("Upload"), button:has-text("New version"), button:has-text("Upload new version"), [data-test="upload-button"]')
-    .first()
-  await uploadBtn.waitFor({ state: 'visible', timeout: 10_000 })
-  await uploadBtn.click()
-
-  // 4. The file picker. Playwright handles the native dialog when you set
-  // the file input directly — works whether the UI has a hidden
-  // <input type=file> or a custom drop zone.
-  // SELECTOR: file input. Most SPA implementations use a hidden
-  // <input type=file accept=".ehpk">.
-  const fileInput = page.locator('input[type="file"]').first()
-  await fileInput.waitFor({ state: 'attached', timeout: 5_000 })
-  await fileInput.setInputFiles(ehpkPath)
-
-  // 5. Submit. May be auto-uploaded on file pick, or require a confirm click.
-  // SELECTOR: confirm/submit button after file pick. If the portal
-  // auto-uploads on selection this branch silently no-ops.
-  const confirmBtn = page
-    .locator('button:has-text("Submit"), button:has-text("Confirm"), button:has-text("Upload")')
-    .last()
-  if (await confirmBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await confirmBtn.click()
+  if (verbose) {
+    page.on('console', msg => console.log(`  [page:${msg.type()}] ${msg.text()}`))
+    page.on('pageerror', err => console.log(`  [page:error] ${err.message}`))
   }
 
-  // 6. Wait for some success signal. The portal usually shows a toast or
-  // updates the version list. We accept anything matching success-y words.
+  // ─── Step 3: open the upload UI ───────────────────────────────────────
+  // SELECTOR: upload-trigger button on the application page. Real selector
+  // TBD — multiple text variants below. After first run, narrow to the one
+  // that actually matches and drop the rest.
+  try {
+    const uploadBtn = page
+      .locator(
+        [
+          'button:has-text("Upload new version")',
+          'button:has-text("New version")',
+          'button:has-text("Upload")',
+          '[data-test="upload-button"]',
+          '[data-testid="upload-button"]',
+          'a:has-text("Upload")',
+        ].join(', '),
+      )
+      .first()
+    await uploadBtn.waitFor({ state: 'visible', timeout: 15_000 })
+    await uploadBtn.click()
+  } catch (err) {
+    console.error('✗ Could not find upload-trigger button.')
+    await dumpFailure(page, 'upload-trigger', err)
+    if (ownsBrowser) await browser.close()
+    process.exit(3)
+  }
+
+  // ─── Step 4: pick the file ────────────────────────────────────────────
+  // SELECTOR: hidden <input type=file>. Most SPA implementations have one.
+  try {
+    const fileInput = page.locator('input[type="file"]').first()
+    await fileInput.waitFor({ state: 'attached', timeout: 8_000 })
+    await fileInput.setInputFiles(ehpkPath)
+    console.log('  File selected.')
+  } catch (err) {
+    console.error('✗ Could not find file input.')
+    await dumpFailure(page, 'file-input', err)
+    if (ownsBrowser) await browser.close()
+    process.exit(4)
+  }
+
+  // ─── Step 5: confirm/submit ──────────────────────────────────────────
+  // SELECTOR: confirm/submit button after file pick. Some portals
+  // auto-upload on file pick — if so, this no-ops.
+  const submitBtn = page
+    .locator(
+      [
+        'button:has-text("Submit")',
+        'button:has-text("Confirm")',
+        'button:has-text("Upload")',
+        'button:has-text("Save")',
+        'button[type="submit"]',
+      ].join(', '),
+    )
+    .last()
+  if (await submitBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
+    await submitBtn.click()
+    console.log('  Submit clicked.')
+  } else {
+    console.log('  No explicit submit found — assuming auto-upload on file pick.')
+  }
+
+  // ─── Step 6: accept the build (post-upload confirmation) ─────────────
+  // The portal often shows a "your build is ready, accept it?" or
+  // "Activate" / "Publish" step after the file is processed.
+  // SELECTOR: accept/publish/activate button. May appear after a 5-30s
+  // server-side processing delay.
+  try {
+    const acceptBtn = page.locator(
+      [
+        'button:has-text("Accept")',
+        'button:has-text("Activate")',
+        'button:has-text("Publish")',
+        'button:has-text("Approve")',
+        'button:has-text("Confirm build")',
+      ].join(', '),
+    )
+    // Wait up to 60s for the build to be processable. The portal often
+    // shows a "processing" spinner first.
+    if (await acceptBtn.first().isVisible({ timeout: 60_000 }).catch(() => false)) {
+      await acceptBtn.first().click()
+      console.log('  Build accepted.')
+    } else {
+      console.log('  No accept-build button surfaced within 60s — may not be required for this app slot.')
+    }
+  } catch (err) {
+    console.warn(`  Accept-build step skipped: ${err.message}`)
+  }
+
+  // ─── Step 7: success signal ──────────────────────────────────────────
   // SELECTOR: success toast / version-list update.
   await page
-    .waitForSelector('text=/uploaded|success|version/i', { timeout: 30_000 })
+    .waitForSelector('text=/uploaded|success|version|active/i', { timeout: 30_000 })
     .catch(() => {
       console.warn('  No success signal seen within 30s — upload may still have worked. Check the portal.')
     })
 
-  console.log('✓ Upload submitted. Verify in the portal.')
-  await context.storageState({ path: STORAGE_STATE })
-  await browser.close()
+  console.log(`✓ Upload submitted for ${packageId} v${appVersion}. Verify in the portal.`)
+
+  // Persist session in fresh-launch mode. Attach mode uses the user's
+  // own Chrome — nothing to save.
+  if (!attach) {
+    await context.storageState({ path: STORAGE_STATE })
+  }
+
+  // Don't close the user's Chrome in attach mode; only close ours.
+  if (ownsBrowser) await browser.close()
 }
 
 function waitForEnter() {
