@@ -43,6 +43,9 @@ const KEY_MODE = 'cue:mode:v1'
 const KEY_CUSTOM_PROMPT = 'cue:custom-prompt:v1'
 const KEY_WORKER_URL = 'cue:worker-url:v1'
 const KEY_WORKER_TOKEN = 'cue:worker-token:v1'
+const KEY_IDLE_AUTO_PAUSE_MIN = 'cue:idle-auto-pause-min:v1'
+
+export const DEFAULT_IDLE_AUTO_PAUSE_MIN = 5
 
 export async function hasAgreedToPrivacy(): Promise<boolean> {
   const raw = await readRaw(KEY_AGREED)
@@ -84,4 +87,20 @@ export async function getWorkerToken(): Promise<string> {
 
 export async function setWorkerToken(token: string): Promise<void> {
   await writeRaw(KEY_WORKER_TOKEN, token.trim())
+}
+
+// Idle auto-pause threshold in minutes. Stored as a small int string. 0 = disable.
+// Negative or non-numeric input falls back to the default — defensive because the
+// phone-side textbox can't be locked down from accepting garbage input.
+export async function getIdleAutoPauseMin(): Promise<number> {
+  const raw = await readRaw(KEY_IDLE_AUTO_PAUSE_MIN)
+  if (raw === null) return DEFAULT_IDLE_AUTO_PAUSE_MIN
+  const n = Number.parseInt(raw, 10)
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_IDLE_AUTO_PAUSE_MIN
+  return n
+}
+
+export async function setIdleAutoPauseMin(min: number): Promise<void> {
+  const n = Math.max(0, Math.floor(min))
+  await writeRaw(KEY_IDLE_AUTO_PAUSE_MIN, String(n))
 }

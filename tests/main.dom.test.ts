@@ -107,4 +107,40 @@ describe('Cue plugin DOM state machine', () => {
     const radios = list.querySelectorAll<HTMLInputElement>('input[type="radio"][name="mode"]')
     expect(radios.length).toBeGreaterThanOrEqual(6)
   })
+
+  it('idle-auto-pause input hydrates from storage and persists changes', async () => {
+    await bootPlugin({
+      storage: {
+        'cue:privacy-agreed:v1': '1',
+        'cue:idle-auto-pause-min:v1': '12',
+      },
+    })
+    const input = document.querySelector<HTMLInputElement>('#idle-auto-pause-min')!
+    const save = document.querySelector<HTMLButtonElement>('#save-idle')!
+    const status = document.querySelector<HTMLElement>('#idle-status')!
+
+    expect(input.value).toBe('12')
+    input.value = '0'
+    save.click()
+    await new Promise(r => setTimeout(r, 30))
+    expect(globalThis.localStorage.getItem('cue:idle-auto-pause-min:v1')).toBe('0')
+    expect(status.textContent ?? '').toMatch(/disabled/i)
+
+    input.value = '7'
+    save.click()
+    await new Promise(r => setTimeout(r, 30))
+    expect(globalThis.localStorage.getItem('cue:idle-auto-pause-min:v1')).toBe('7')
+    expect(status.textContent ?? '').toMatch(/7 min/)
+  })
+
+  it('idle-auto-pause input rejects negative values, falls back to default', async () => {
+    await bootPlugin({ storage: { 'cue:privacy-agreed:v1': '1' } })
+    const input = document.querySelector<HTMLInputElement>('#idle-auto-pause-min')!
+    const save = document.querySelector<HTMLButtonElement>('#save-idle')!
+    input.value = '-3'
+    save.click()
+    await new Promise(r => setTimeout(r, 30))
+    // -3 is non-finite-or-negative → falls back to default 5
+    expect(globalThis.localStorage.getItem('cue:idle-auto-pause-min:v1')).toBe('5')
+  })
 })

@@ -6,12 +6,15 @@ import { connectEvenRuntime, type EvenRuntime, type InputSource, type SwipeDir }
 import { DEFAULT_MODE, MODES, type Mode, type ModeId, modeById, nextMode } from './modes'
 import { nextMockExchange, nextMockProactiveTopics, resetMock } from './mock'
 import {
+  DEFAULT_IDLE_AUTO_PAUSE_MIN,
   getCustomPrompt,
+  getIdleAutoPauseMin,
   getMode,
   getWorkerToken,
   getWorkerUrl,
   hasAgreedToPrivacy,
   setCustomPrompt,
+  setIdleAutoPauseMin,
   setMode,
   setPrivacyAgreed,
   setStorageBridge,
@@ -49,7 +52,8 @@ const TRANSCRIPT_WINDOW_CHARS = 1500
 // reactive on a sentence-final pause, slow enough not to hammer BLE.
 const MIC_TICK_MS = 1_000
 // Auto-pause after this much idle. Idle = no non-empty transcript chunk.
-const IDLE_AUTO_PAUSE_MS = 5 * 60_000
+// 0 disables. Sourced from phone settings on bootstrap; falls back to default.
+let idleAutoPauseMs = DEFAULT_IDLE_AUTO_PAUSE_MIN * 60_000
 
 let transport: CueTransport | null = null
 let isRealMode = false // true when transport.ready (Worker configured)
@@ -130,6 +134,15 @@ root.innerHTML = `
       </div>
     </section>
 
+    <section>
+      <h2 style="font-size: 1.1em; margin: 1.5rem 0 .5rem 0;">Behavior</h2>
+      <div style="display: grid; gap: .25rem; max-width: 520px;">
+        <label>Auto-pause after idle (minutes; 0 disables) <input id="idle-auto-pause-min" type="number" min="0" step="1" style="padding: .35rem; width: 6em; box-sizing: border-box;" /></label>
+        <button id="save-idle" type="button" style="margin-top: .25rem; padding: .35rem .7rem; cursor: pointer; max-width: 200px;">Save</button>
+        <p id="idle-status" style="color: #2a2; font-size: .85em; min-height: 1.2em;"></p>
+      </div>
+    </section>
+
     <section style="margin-top: 2rem; color: #7b7b7b; font-size: .85em;">
       <h3 style="font-size: 1em; margin: 0 0 .5rem 0;">How to use</h3>
       <ol style="padding-left: 1.25rem; line-height: 1.5;">
@@ -153,6 +166,9 @@ const workerStatus = document.querySelector<HTMLParagraphElement>('#worker-statu
 const privacyModal = document.querySelector<HTMLDivElement>('#privacy-modal')!
 const privacyAccept = document.querySelector<HTMLButtonElement>('#privacy-accept')!
 const privacyDecline = document.querySelector<HTMLButtonElement>('#privacy-decline')!
+const idleAutoPauseInput = document.querySelector<HTMLInputElement>('#idle-auto-pause-min')!
+const saveIdleBtn = document.querySelector<HTMLButtonElement>('#save-idle')!
+const idleStatus = document.querySelector<HTMLParagraphElement>('#idle-status')!
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c =>
@@ -384,9 +400,10 @@ function stopMicTick(): void {
 async function micTick(): Promise<void> {
   if (!micOn) return
   const now = Date.now()
-  // Idle auto-pause: no non-empty transcript for IDLE_AUTO_PAUSE_MS.
-  if (now - lastTranscriptAt > IDLE_AUTO_PAUSE_MS) {
-    autoPausedReason = `Auto-paused after ${Math.round(IDLE_AUTO_PAUSE_MS / 60_000)} min idle`
+  // Idle auto-pause: no non-empty transcript for idleAutoPauseMs.
+  // 0 disables — user can opt out via phone settings.
+  if (idleAutoPauseMs > 0 && now - lastTranscriptAt > idleAutoPauseMs) {
+    autoPausedReason = `Auto-paused after ${Math.round(idleAutoPauseMs / 60_000)} min idle`
     await toggleMic() // turns mic off + repaints
     return
   }
@@ -561,6 +578,19 @@ saveCustomBtn.addEventListener('click', async () => {
   window.setTimeout(() => { saveCustomBtn.textContent = 'Save custom prompt' }, 2000)
 })
 
+saveIdleBtn.addEventListener('click', async () => {
+  const raw = Number.parseInt(idleAutoPauseInput.value, 10)
+  const min = Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_IDLE_AUTO_PAUSE_MIN
+  await setIdleAutoPauseMin(min)
+  idleAutoPauseMs = min * 60_000
+  idleAutoPauseInput.value = String(min)
+  idleStatus.style.color = '#2a2'
+  idleStatus.textContent = min === 0
+    ? 'Saved. Auto-pause disabled.'
+    : `Saved. Mic will auto-pause after ${min} min idle.`
+  window.setTimeout(() => { idleStatus.textContent = '' }, 4000)
+})
+
 saveWorkerBtn.addEventListener('click', async () => {
   await setWorkerUrl(workerUrlInput.value)
   await setWorkerToken(workerTokenInput.value)
@@ -608,6 +638,9 @@ async function bootstrap(): Promise<void> {
   const wTok = await getWorkerToken()
   workerUrlInput.value = wUrl
   workerTokenInput.value = wTok
+  const idleMin = await getIdleAutoPauseMin()
+  idleAutoPauseInput.value = String(idleMin)
+  idleAutoPauseMs = idleMin * 60_000
   // Set up transport if both Worker URL + token are configured. If they're
   // unset or change later, mock mode runs.
   transport = createTransport(wUrl, wTok)

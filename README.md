@@ -4,7 +4,7 @@
 
 A multi-mode conversation coach for Even Realities G2 smart glasses. Listens to the conversation, surfaces 2-3 suggested responses on the display in real time. Pick a mode (Date / Argue calm / Sales close / Sting / Listen well / Custom) to shape the suggestions. The app never speaks for you — it offers cues you say in your own voice.
 
-## Status: v0.3.0 (suggestion-quality polish + glasses UI tweaks)
+## Status: v0.3.1 (suggestion-quality polish + glasses UI tweaks + phone-side idle setting)
 
 If you've deployed the personal Worker (see `worker-template/README.md`) and pasted its URL + bearer token in phone settings, Cue streams audio over chunked HTTP → Deepgram for transcription, and POSTs your rolling transcript to the Worker's `/suggest` endpoint for LLM suggestions. If those settings are blank or the Worker is unreachable, Cue falls back to the v0.1.0 timer-driven mock suggestions so the app stays demonstrable.
 
@@ -13,7 +13,8 @@ If you've deployed the personal Worker (see `worker-template/README.md`) and pas
 | v0.1.0 | Scaffold, mode picker, privacy opt-in, mic toggle, glasses UI, mock suggestion driver |
 | v0.2.0 | Worker template (Deepgram + LLM bridge), real audio capture via `audioControl`, transport layer, live captions, debounced LLM suggestions. Mock fallback preserved. |
 | v0.2.5 | Test infrastructure: chunked HTTP transport, JSDOM tests, worker integration tests, app.json lint, KNOWN_QUIRKS, WebKit harness for iOS WKWebView parity. |
-| **v0.3.0** *(current)* | End-of-utterance detection (sentence-final punctuation + silence-gap + max-wait), sentence-aware transcript trimming, battery glyph in glasses header, idle auto-pause after 5 min, word-boundary line wrap on suggestions, per-mode bullet glyphs, first-word emphasis. |
+| v0.3.0 | End-of-utterance detection (sentence-final punctuation + silence-gap + max-wait), sentence-aware transcript trimming, battery glyph in glasses header, idle auto-pause after 5 min, word-boundary line wrap on suggestions, per-mode bullet glyphs, first-word emphasis. |
+| **v0.3.1** *(current)* | Phone-side `idle-auto-pause-min` setting — was a 5-min hardcode. 0 disables. |
 | v0.4.0 *(planned)* | Worker-side dedupe of repeated suggestions, retry/backoff on rate-limit, partial-transcript pulses if Deepgram streaming becomes available. |
 
 ## How it works (current v0.2.0)
