@@ -4,7 +4,7 @@
 
 A multi-mode conversation coach for Even Realities G2 smart glasses. Listens to the conversation, surfaces 2-3 suggested responses on the display in real time. Pick a mode (Date / Argue calm / Sales close / Sting / Listen well / Custom) to shape the suggestions. The app never speaks for you — it offers cues you say in your own voice.
 
-## Status: v0.3.1 (suggestion-quality polish + glasses UI tweaks + phone-side idle setting)
+## Status: v0.3.2 (idle-screen battery fix + mock-bridge test coverage + whitelist cleanup)
 
 If you've deployed the personal Worker (see `worker-template/README.md`) and pasted its URL + bearer token in phone settings, Cue streams audio over chunked HTTP → Deepgram for transcription, and POSTs your rolling transcript to the Worker's `/suggest` endpoint for LLM suggestions. If those settings are blank or the Worker is unreachable, Cue falls back to the v0.1.0 timer-driven mock suggestions so the app stays demonstrable.
 
@@ -14,7 +14,8 @@ If you've deployed the personal Worker (see `worker-template/README.md`) and pas
 | v0.2.0 | Worker template (Deepgram + LLM bridge), real audio capture via `audioControl`, transport layer, live captions, debounced LLM suggestions. Mock fallback preserved. |
 | v0.2.5 | Test infrastructure: chunked HTTP transport, JSDOM tests, worker integration tests, app.json lint, KNOWN_QUIRKS, WebKit harness for iOS WKWebView parity. |
 | v0.3.0 | End-of-utterance detection (sentence-final punctuation + silence-gap + max-wait), sentence-aware transcript trimming, battery glyph in glasses header, idle auto-pause after 5 min, word-boundary line wrap on suggestions, per-mode bullet glyphs, first-word emphasis. |
-| **v0.3.1** *(current)* | Phone-side `idle-auto-pause-min` setting — was a 5-min hardcode. 0 disables. |
+| v0.3.1 | Phone-side `idle-auto-pause-min` setting — was a 5-min hardcode. 0 disables. |
+| **v0.3.2** *(current)* | Battery glyph now appears on idle screen (was only visible mid-session). Mock-bridge JSDOM coverage for v0.3 state machine (auto-pause, mode cycle, foreground re-paint). Stale `wss://` whitelist entry removed (chunked HTTP supplanted WebSocket in v0.2.5). |
 | v0.4.0 *(planned)* | Worker-side dedupe of repeated suggestions, retry/backoff on rate-limit, partial-transcript pulses if Deepgram streaming becomes available. |
 
 ## How it works (current v0.2.0)
@@ -93,7 +94,7 @@ npx evenhub-simulator --glow http://localhost:5176
 | `src/mock.ts` | Mock-mode timer-driven canned suggestions (fallback when Worker unset) |
 | `src/storage.ts` | Native `setLocalStorage` wrapper for mode + privacy + Worker config |
 | `worker-template/` | Cloudflare Worker source — Deepgram + `/suggest` LLM bridge |
-| `tests/*.test.ts` | Vitest unit tests (45 passing) |
+| `tests/*.test.ts` | Vitest unit tests (54 passing) |
 | `scripts/regression.mjs` | Simulator-driven e2e flow check (mock-fallback path, 4/4) |
 
 ## Roadmap

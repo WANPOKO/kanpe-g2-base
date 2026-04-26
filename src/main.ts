@@ -664,6 +664,11 @@ async function bootstrap(): Promise<void> {
   even.onDoubleTap(onDoubleTap)
   even.onForeground(() => { void paint() })
 
+  // One-shot battery read so the idle screen shows the glyph before the
+  // first mic-tick. The tick keeps it fresh while mic is on; without this
+  // call the battery glyph is invisible on every cold-start idle render.
+  try { cachedBatteryLevel = await even.getBatteryLevel() } catch { /* ignore */ }
+
   await paint()
 }
 
