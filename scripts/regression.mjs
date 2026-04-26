@@ -58,6 +58,21 @@ async function waitForState(predicate, { timeoutMs = 15_000, label } = {}) {
   }
   throw new Error(`timed out waiting for state: ${label ?? '(unlabeled)'}`)
 }
+// Sample over `durationMs`, return count of [cue:state] logs that
+// appeared during the window. Lets us catch the silent-render-loop
+// regression where the app emits the right state once and then stops.
+// Pattern lifted from lyrics-glow (which has the most fragile render
+// cadence of the four apps).
+async function countStateLogs(durationMs) {
+  const before = await fetchConsoleEntries()
+  const startId = before.length > 0 ? before[before.length - 1].id : -1
+  await new Promise(r => setTimeout(r, durationMs))
+  const after = await fetchConsoleEntries()
+  const fresh = after.filter(e => e.id > startId && typeof e.message === 'string' && e.message.includes('[cue:state]'))
+  if (fresh.length > 0) lastConsoleId = Math.max(lastConsoleId, fresh[fresh.length - 1].id)
+  return fresh.length
+}
+
 async function screenshot(name) {
   await mkdir(OUT_DIR, { recursive: true })
   const r = await fetch(`${SIM_BASE}/api/screenshot/glasses`)
@@ -128,6 +143,17 @@ async function main() {
   )
   check('tap again turns mic off', idleAgain.message.includes('mic=off'), idleAgain.message)
   await screenshot('05-back-to-idle')
+
+  console.log('5. Render loop liveness (3s sample, mic on)')
+  // Re-tap to start a mock session, then sample state-log frequency.
+  // Mock-tick fires every 8s; mic-tick fires every 1s. Expect at least
+  // 2 state logs in a 3s window — catches "loop died after first render".
+  await input('click')
+  await waitForState(m => m.includes('mic=on'), { label: 'mic on for liveness sample', timeoutMs: 3_000 })
+  const ticks = await countStateLogs(3_000)
+  check('render loop emits state logs while mic on', ticks >= 2, `${ticks} state logs in 3s`)
+  await input('click') // back to idle
+  await waitForState(m => m.includes('mic=off'), { label: 'mic off after liveness', timeoutMs: 3_000 })
 
   console.log()
   console.log(`Result: ${pass} passed, ${fail} failed`)

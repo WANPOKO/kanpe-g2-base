@@ -109,6 +109,42 @@ const SCRIPT: MockEntry[] = [
         'It sounds like a lot has happened in those months.',
         'Tell me more about what you mean by that.',
       ],
+      // Custom mode demo — without this entry custom falls back to date-mode
+      // suggestions, which is correct fallback but unhelpful for previewing
+      // what custom-prompt output looks like at glance time.
+      custom: [
+        'Use your phone-side custom prompt to shape what shows here.',
+      ],
+    },
+  },
+  {
+    // Longer suggestions deliberately exercise the v0.3.0 word-wrap path
+    // (LINE_WIDTH = 38). Without an entry like this in mock mode, the wrap
+    // helper only gets exercised in unit tests and never visually validated
+    // during dev preview.
+    transcript: 'I think the meeting tomorrow is the right time to bring it up.',
+    suggestionsByMode: {
+      date: [
+        'What outcome would feel like a win for you?',
+      ],
+      'argue-calm': [
+        'I want to support you — what would help most going in?',
+        'It sounds like this has been on your mind for a while.',
+      ],
+      'sales-close': [
+        'What objection do you expect, and how would you handle it?',
+        'Could we do a quick dry-run together this evening?',
+      ],
+      sting: [
+        'Bring snacks. Confidence loves a good blood-sugar baseline.',
+      ],
+      listen: [
+        'What I hear is that tomorrow feels like the right window.',
+        'Tell me more about why now feels different.',
+      ],
+      custom: [
+        'Custom-mode suggestions follow your phone-side prompt verbatim.',
+      ],
     },
   },
 ]
