@@ -79,6 +79,95 @@ describe('createTransport', () => {
     if (!r.ok) expect(r.error).toMatch(/Failed to fetch/)
   })
 
+  // ─── v0.4.0: utterances field on /transcribe response ─────────────
+  it('parses utterances field into TranscriptEvent.utterances', async () => {
+    const fetchSpy = vi.fn(async (url: string) => {
+      // Probe response (healthz) gets a generic ok
+      if (typeof url === 'string' && url.includes('/healthz')) {
+        return new Response('ok', { status: 200 })
+      }
+      // /transcribe response shape from the v0.4.0 worker
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          text: 'hello there how are you',
+          utterances: [
+            { speaker: 0, text: 'hello there', confidence: 0.95 },
+            { speaker: 1, text: 'how are you', confidence: 0.91 },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+
+    const t = createTransport('https://cue.example.workers.dev', 'secret')
+    let captured: { text: string; isFinal: boolean; utterances: Array<{ speaker: number; text: string; confidence: number }> } | null = null
+    await t.startMicSession(
+      e => { captured = { text: e.text, isFinal: e.isFinal, utterances: e.utterances } },
+      () => {},
+    )
+    // Send enough audio bytes to trip MIN_CHUNK_BYTES (~16KB) so endMicSession's
+    // tail-flush fires.
+    t.sendAudioFrame(new Uint8Array(20_000))
+    await t.endMicSession()
+    expect(captured).not.toBeNull()
+    expect(captured!.utterances).toHaveLength(2)
+    expect(captured!.utterances[0]).toMatchObject({ speaker: 0, text: 'hello there', confidence: 0.95 })
+    expect(captured!.utterances[1]).toMatchObject({ speaker: 1, text: 'how are you', confidence: 0.91 })
+    expect(captured!.text).toBe('hello there how are you')
+  })
+
+  it('handles missing utterances field (back-compat with older worker)', async () => {
+    const fetchSpy = vi.fn(async (url: string) => {
+      if (typeof url === 'string' && url.includes('/healthz')) {
+        return new Response('ok', { status: 200 })
+      }
+      // Old worker: no utterances field
+      return new Response(
+        JSON.stringify({ ok: true, text: 'just text, no speakers' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+
+    const t = createTransport('https://cue.example.workers.dev', 'secret')
+    let captured: { text: string; utterances: unknown[] } | null = null
+    await t.startMicSession(e => { captured = { text: e.text, utterances: e.utterances } }, () => {})
+    t.sendAudioFrame(new Uint8Array(20_000))
+    await t.endMicSession()
+    expect(captured).not.toBeNull()
+    expect(captured!.text).toBe('just text, no speakers')
+    expect(captured!.utterances).toEqual([]) // empty array, not undefined
+  })
+
+  it('drops empty-text utterances from the array', async () => {
+    const fetchSpy = vi.fn(async (url: string) => {
+      if (typeof url === 'string' && url.includes('/healthz')) {
+        return new Response('ok', { status: 200 })
+      }
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          text: 'hi',
+          utterances: [
+            { speaker: 0, text: 'hi', confidence: 0.9 },
+            { speaker: 0, text: '', confidence: 0.0 },        // dropped
+            { speaker: 1, text: '   ', confidence: 0.1 },     // dropped (whitespace)
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+    const t = createTransport('https://cue.example.workers.dev', 'secret')
+    let captured: { utterances: unknown[] } | null = null
+    await t.startMicSession(e => { captured = { utterances: e.utterances } }, () => {})
+    t.sendAudioFrame(new Uint8Array(20_000))
+    await t.endMicSession()
+    expect(captured!.utterances).toHaveLength(1)
+  })
+
   it('passes customPrompt when provided', async () => {
     const fetchSpy = vi.fn(async () => new Response(
       JSON.stringify({ ok: true, suggestions: ['x'] }),

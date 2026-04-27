@@ -28,10 +28,14 @@ import {
 } from './storage'
 import { createTransport, setTransportLogger, type CueFetchLog, type CueTransport, type TranscriptEvent } from './transport'
 import {
+  appendTurn,
   batteryHeaderSuffix,
+  pruneTurns,
   shouldRequestSuggestion,
+  speakerLabel,
   trimToSentences,
   wrapWords,
+  type ConversationTurn,
 } from './utterance'
 
 // --- module state ---
@@ -81,44 +85,11 @@ let autoPausedReason = ''
 let showDebugOverlay = false  // diagnostic stats line on glasses
 let wearerSpeakerId = DEFAULT_WEARER_SPEAKER_ID  // -1 = none / no filter
 
-// v0.4.0 transcript display: instead of replacing lastTranscript with
-// each chunk's text (which made earlier words vanish before the user
-// could read them), we accumulate per-speaker turns. Each entry stays
-// visible for SCROLLBACK_WINDOW_MS, then ages out. Display shows the
-// last few turns concatenated, capped to display width.
-interface ConversationTurn {
-  speaker: number
-  text: string
-  ts: number
-}
+// v0.4.0 transcript display: per-speaker rolling buffer. Pure helpers
+// in utterance.ts (appendTurn / pruneTurns / speakerLabel) — covered
+// by unit tests there.
 const conversation: ConversationTurn[] = []
-const SCROLLBACK_WINDOW_MS = 30_000  // 30s of recent turns
 const MAX_DISPLAYED_TURNS = 4
-function pruneConversation(): void {
-  const cutoff = Date.now() - SCROLLBACK_WINDOW_MS
-  while (conversation.length > 0 && conversation[0]!.ts < cutoff) {
-    conversation.shift()
-  }
-  while (conversation.length > MAX_DISPLAYED_TURNS * 2) {
-    conversation.shift()
-  }
-}
-function appendToConversation(speaker: number, text: string): void {
-  // Same-speaker continuation? Append to the existing turn instead of
-  // creating a new one so words stream in cleanly until they switch.
-  const last = conversation[conversation.length - 1]
-  if (last && last.speaker === speaker) {
-    last.text = `${last.text} ${text}`.trim()
-    last.ts = Date.now()
-  } else {
-    conversation.push({ speaker, text, ts: Date.now() })
-  }
-  pruneConversation()
-}
-function speakerLabel(id: number): string {
-  // 0→A, 1→B, 2→C, ... — readable on the small display.
-  return String.fromCharCode(65 + Math.max(0, Math.min(25, id)))
-}
 
 // Phone-side fetch debug log. Captures every /transcribe + /suggest
 // call so we can see exactly what URL / status / error is happening
@@ -424,7 +395,7 @@ function renderGlasses(): string {
   // v0.4.0: render up to MAX_DISPLAYED_TURNS of the rolling conversation
   // with [A]/[B] speaker labels. Wearer's turns marked "(you)" so the
   // user knows we're filtering them from the suggestion context.
-  pruneConversation()
+  pruneTurns(conversation, Date.now())
   const recent = conversation.slice(-MAX_DISPLAYED_TURNS)
   if (recent.length > 0) {
     for (const turn of recent) {
@@ -638,7 +609,7 @@ function onTranscriptFrame(e: TranscriptEvent): void {
   // Accumulate into the conversation (same-speaker turns merge so words
   // stream in until the speaker actually changes).
   for (const t of turns) {
-    appendToConversation(t.speaker, t.text)
+    appendTurn(conversation, t.speaker, t.text, Date.now())
   }
 
   // Build the rolling LLM-context buffer EXCLUDING the wearer's lines

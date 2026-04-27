@@ -114,8 +114,13 @@ export function createTransport(workerUrl: string, bearerToken: string): CueTran
   // pipeline on a slow request — `inFlight` gates concurrency and any
   // bytes that arrive while a request is in flight just keep accumulating
   // in `pending` for the next flush.
-  async function flush(): Promise<void> {
-    if (!active || inFlight || pending.byteLength < MIN_CHUNK_BYTES) return
+  async function flush(force = false): Promise<void> {
+    // `force` lets endMicSession drain the trailing partial chunk
+    // even after `active` has been cleared. Without it, the
+    // post-session flush is a silent no-op (caught while writing
+    // v0.4.0 utterance tests; previously the trailing 5-30s of a
+    // session was being dropped on the floor).
+    if ((!active && !force) || inFlight || pending.byteLength < MIN_CHUNK_BYTES) return
     inFlight = true
     chunksFlushed += 1
     const chunk = pending
@@ -240,9 +245,11 @@ export function createTransport(workerUrl: string, bearerToken: string): CueTran
     },
     async endMicSession() {
       // Final flush for the trailing partial chunk so a quick utterance
-      // ending mid-buffer isn't dropped.
+      // ending mid-buffer isn't dropped. `force` is required because the
+      // active-flag check would otherwise skip the trailing send (set
+      // active=false BEFORE awaiting so no new sendAudioFrame races in).
       active = false
-      await flush()
+      await flush(true)
       onTranscriptCb = null
       onErrorCb = null
     },

@@ -149,6 +149,69 @@ export function wrapWords(text: string, width: number, maxLines: number): string
   return out
 }
 
+// --- conversation accumulation (v0.4.0) ---
+//
+// Per-speaker rolling buffer for transcript display. Same-speaker turns
+// merge so words stream in until the speaker actually changes (fixes
+// the v0.3 bug where each 2.5s chunk overwrote the previous one).
+// Old turns age out of the window so the buffer doesn't grow unbounded.
+
+export interface ConversationTurn {
+  speaker: number
+  text: string
+  ts: number
+}
+
+export interface ConversationConfig {
+  /** How long a turn stays in the buffer (ms). */
+  scrollbackMs: number
+  /** Hard cap on buffer length so a non-stop speaker can't grow it. */
+  hardCap: number
+}
+
+export const DEFAULT_CONVERSATION: ConversationConfig = {
+  scrollbackMs: 30_000,
+  hardCap: 8,
+}
+
+/**
+ * Append a new utterance to the buffer, merging into the last turn if
+ * it's the same speaker. Returns the (mutated) buffer for chaining.
+ */
+export function appendTurn(
+  buffer: ConversationTurn[],
+  speaker: number,
+  text: string,
+  now: number,
+  cfg: ConversationConfig = DEFAULT_CONVERSATION,
+): ConversationTurn[] {
+  if (text.trim().length === 0) return buffer
+  const last = buffer[buffer.length - 1]
+  if (last && last.speaker === speaker) {
+    last.text = `${last.text} ${text}`.trim()
+    last.ts = now
+  } else {
+    buffer.push({ speaker, text: text.trim(), ts: now })
+  }
+  return pruneTurns(buffer, now, cfg)
+}
+
+export function pruneTurns(
+  buffer: ConversationTurn[],
+  now: number,
+  cfg: ConversationConfig = DEFAULT_CONVERSATION,
+): ConversationTurn[] {
+  const cutoff = now - cfg.scrollbackMs
+  while (buffer.length > 0 && buffer[0]!.ts < cutoff) buffer.shift()
+  while (buffer.length > cfg.hardCap) buffer.shift()
+  return buffer
+}
+
+/** 0 → "A", 1 → "B", ..., 25 → "Z". Clamps out-of-range. */
+export function speakerLabel(id: number): string {
+  return String.fromCharCode(65 + Math.max(0, Math.min(25, id)))
+}
+
 // --- battery glyph for header ---
 
 /**
