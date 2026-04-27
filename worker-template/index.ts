@@ -73,7 +73,21 @@ async function handleTranscribe(request: Request, env: Env): Promise<Response> {
   // returns a single transcript for the chunk. This bypasses WebSockets
   // entirely so the plugin's WebView (which can't open outbound WS) can
   // still get real STT via fetch() — same network permission as /suggest.
-  if (request.method !== 'POST') return jsonResponse(405, { ok: false, error: 'POST only' })
+  if (request.method !== 'POST') {
+    // Echo what we ACTUALLY received in the body so the plugin's debug
+    // log shows whether something is downgrading POST→GET in transit
+    // (Cloudflare WAF, redirect, WebView quirk, etc.). Plain text body
+    // so it's readable when curl-tested.
+    const cf = (request as unknown as { cf?: Record<string, unknown> }).cf
+    const headerKeys: string[] = []
+    request.headers.forEach((_v, k) => headerKeys.push(k))
+    return new Response(
+      `POST only. Received: method=${request.method}, url=${request.url}, ` +
+      `headers=[${headerKeys.join(',')}], cf-ray=${request.headers.get('cf-ray') ?? 'none'}, ` +
+      `cf-country=${(cf as { country?: string } | undefined)?.country ?? 'none'}`,
+      { status: 405, headers: { 'Content-Type': 'text/plain', ...corsHeaders() } },
+    )
+  }
   const auth = request.headers.get('Authorization') ?? ''
   if (!env.SHARED_SECRET || auth !== `Bearer ${env.SHARED_SECRET}`) {
     return jsonResponse(401, { ok: false, error: 'unauthorized' })
@@ -310,6 +324,12 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // Log every incoming request so `wrangler tail` shows what's actually
+    // arriving at the worker (vs what the plugin claims it's sending).
+    // Catches the class of bug where Cloudflare WAF / WebView / a redirect
+    // mangles the method en route. Cheap — Workers logging is async.
+    // eslint-disable-next-line no-console
+    console.log(`[req] ${request.method} ${new URL(request.url).pathname} ua=${(request.headers.get('user-agent') ?? '').slice(0, 60)}`)
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders() })
     }
