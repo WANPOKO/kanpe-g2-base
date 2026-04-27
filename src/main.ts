@@ -20,7 +20,10 @@ import {
   setIdleAutoPauseMin,
   setMode,
   setPrivacyAgreed,
+  appendSessionRecord,
+  clearSessionHistory,
   getCalibrating,
+  loadSessionHistory,
   setCalibrating,
   setShowDebugOverlay,
   setStorageBridge,
@@ -89,6 +92,11 @@ let wearerSpeakerId = DEFAULT_WEARER_SPEAKER_ID  // -1 = none / no filter
 // v0.4.2: when true, the next non-empty utterance's speaker is anchored
 // as wearer + the flag is cleared. Set by phone-side "Calibrate me".
 let calibratingNow = false
+
+// v0.4.3: session-record bookkeeping — captures mic-on → mic-off as
+// one entry in the persisted session-history. Resets on each mic-on.
+let sessionStartedAt = 0
+let sessionSuggestionCount = 0
 
 // v0.4.0 transcript display: per-speaker rolling buffer. Pure helpers
 // in utterance.ts (appendTurn / pruneTurns / speakerLabel) — covered
@@ -237,6 +245,22 @@ root.innerHTML = `
         <p style="color: #7b7b7b; font-size: .85em; margin: 0;">Tap, put on glasses, say "this is me" — the next utterance Deepgram detects becomes your speaker ID. Replaces the dropdown above.</p>
         <p id="calibrate-status" style="color: #2a2; font-size: .85em; min-height: 1.2em; margin: 0;"></p>
       </div>
+    </section>
+
+    <section style="margin-top: 2rem;">
+      <details>
+        <summary style="cursor: pointer; color: #232323;">Past sessions (review your conversations)</summary>
+        <p style="color: #7b7b7b; margin: .5rem 0; font-size: .85em; max-width: 520px;">
+          Last 50 mic sessions. Stored locally on this device (Even Hub's
+          per-app storage) — never sent to any server beyond what the live
+          /transcribe + /suggest calls already do.
+        </p>
+        <div style="display: flex; gap: .5rem; margin-bottom: .5rem;">
+          <button id="session-history-clear" type="button" style="padding: .35rem .7rem; cursor: pointer; background: #eee;">Clear all</button>
+          <button id="session-history-refresh" type="button" style="padding: .35rem .7rem; cursor: pointer; background: #eee;">Refresh</button>
+        </div>
+        <div id="session-history" style="max-width: 720px; max-height: 360px; overflow-y: auto; font-size: .85em; border: 1px solid #ddd; padding: .5rem;"></div>
+      </details>
     </section>
 
     <section style="margin-top: 2rem;">
@@ -523,6 +547,11 @@ async function toggleMic(): Promise<void> {
     lastTranscriptAt = Date.now()
     lastChunkAt = Date.now()
     lastChunkText = ''
+    // v0.4.3: start a new session record; reset counters
+    sessionStartedAt = Date.now()
+    sessionSuggestionCount = 0
+    // Reset the LLM transcript window so the new session starts fresh
+    liveTranscript = ''
     if (isRealMode && transport && even) {
       await startRealSession()
     } else {
@@ -535,6 +564,17 @@ async function toggleMic(): Promise<void> {
     stopMicTick()
     if (transport) await transport.endMicSession()
     if (even) await even.stopMic()
+    // v0.4.3: persist the session record (only if we accumulated something —
+    // skip empty sessions where the user toggled mic on/off in <1s).
+    if (sessionStartedAt > 0 && liveTranscript.trim().length > 0) {
+      void appendSessionRecord({
+        startedAt: sessionStartedAt,
+        endedAt: Date.now(),
+        mode: currentMode,
+        transcript: liveTranscript,
+        suggestionCount: sessionSuggestionCount,
+      }).then(() => renderSessionHistory())
+    }
   }
   await paint()
 }
@@ -689,6 +729,7 @@ async function maybeRequestSuggestions(): Promise<void> {
   if (!fire) return
   suggestionInFlight = true
   lastSuggestionAt = Date.now()
+  sessionSuggestionCount += 1
   try {
     const customPrompt = currentMode === 'custom' ? await getCustomPrompt() : undefined
     const result = await transport.requestSuggestions({
@@ -798,6 +839,59 @@ fetchLogClearBtn.addEventListener('click', () => { fetchLog.length = 0; renderFe
 fetchLogRefreshBtn.addEventListener('click', () => renderFetchLog())
 setTransportLogger(pushFetchLog)
 renderFetchLog()
+
+// v0.4.3 — Session history panel (past mic sessions)
+const sessionHistoryEl = document.querySelector<HTMLDivElement>('#session-history')!
+const sessionHistoryClearBtn = document.querySelector<HTMLButtonElement>('#session-history-clear')!
+const sessionHistoryRefreshBtn = document.querySelector<HTMLButtonElement>('#session-history-refresh')!
+sessionHistoryClearBtn.addEventListener('click', async () => {
+  if (!confirm('Delete all past session records? This cannot be undone.')) return
+  await clearSessionHistory()
+  await renderSessionHistory()
+})
+sessionHistoryRefreshBtn.addEventListener('click', () => { void renderSessionHistory() })
+
+function fmtSessionDuration(start: number, end: number): string {
+  const s = Math.round((end - start) / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rs = s % 60
+  return rs === 0 ? `${m}m` : `${m}m ${rs}s`
+}
+
+function fmtSessionDate(ts: number): string {
+  const d = new Date(ts)
+  const today = new Date()
+  const sameDay = d.toDateString() === today.toDateString()
+  if (sameDay) return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+async function renderSessionHistory(): Promise<void> {
+  if (!sessionHistoryEl) return
+  const records = await loadSessionHistory()
+  if (records.length === 0) {
+    sessionHistoryEl.innerHTML = '<div style="color: #7b7b7b; padding: .5rem;">No past sessions yet. Sessions are saved when you toggle mic off after capturing some transcript.</div>'
+    return
+  }
+  sessionHistoryEl.innerHTML = records
+    .map(r => {
+      const preview = r.transcript.length > 200 ? `${r.transcript.slice(0, 200)}…` : r.transcript
+      return `<div style="padding: .5rem; border-bottom: 1px solid #f0f0f0;">
+        <div style="display: flex; gap: .5rem; align-items: center; color: #555;">
+          <strong>${escapeHtml(r.mode)}</strong>
+          <span>${fmtSessionDate(r.startedAt)}</span>
+          <span>· ${fmtSessionDuration(r.startedAt, r.endedAt)}</span>
+          <span>· ${r.suggestionCount} suggestion${r.suggestionCount === 1 ? '' : 's'}</span>
+        </div>
+        <div style="margin-top: .25rem; color: #232323; line-height: 1.4;">${escapeHtml(preview)}</div>
+      </div>`
+    })
+    .join('')
+}
+
+// Initial render + re-render after each mic session ends.
+void renderSessionHistory()
 
 saveIdleBtn.addEventListener('click', async () => {
   const raw = Number.parseInt(idleAutoPauseInput.value, 10)

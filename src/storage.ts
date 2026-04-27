@@ -145,3 +145,41 @@ export async function getCalibrating(): Promise<boolean> {
 export async function setCalibrating(on: boolean): Promise<void> {
   await writeRaw(KEY_CALIBRATING, on ? '1' : '0')
 }
+
+// v0.4.3: per-session transcript persistence. Cue saves each mic session
+// as a record so the user can review past conversations on phone-side
+// settings. Capped at SESSION_HISTORY_CAP entries (newest first); older
+// roll off. NOT a transcript of every chunk — just one record per
+// mic-on / mic-off pair with the assembled transcript + suggestions.
+const KEY_SESSION_HISTORY = 'cue:session-history:v1'
+export const SESSION_HISTORY_CAP = 50
+
+export interface SessionRecord {
+  startedAt: number      // Date.now() at mic-on
+  endedAt: number        // Date.now() at mic-off
+  mode: string           // ModeId at session start
+  transcript: string     // accumulated other-speakers' transcript (no wearer)
+  suggestionCount: number  // total /suggest calls made
+}
+
+export async function loadSessionHistory(): Promise<SessionRecord[]> {
+  const raw = await readRaw(KEY_SESSION_HISTORY)
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as SessionRecord[]
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+export async function appendSessionRecord(rec: SessionRecord): Promise<void> {
+  const list = await loadSessionHistory()
+  list.unshift(rec)
+  while (list.length > SESSION_HISTORY_CAP) list.pop()
+  await writeRaw(KEY_SESSION_HISTORY, JSON.stringify(list))
+}
+
+export async function clearSessionHistory(): Promise<void> {
+  await writeRaw(KEY_SESSION_HISTORY, JSON.stringify([]))
+}
