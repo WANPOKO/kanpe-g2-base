@@ -37,6 +37,42 @@ export interface CueTransport {
   stats: () => { framesReceived: number; bytesReceived: number; chunksFlushed: number; chunksOk: number; lastError: string }
 }
 
+// Per-fetch debug log entry — captured for every /transcribe and /suggest
+// call so the phone-side debug panel can show exactly what URL was hit,
+// what the worker said, and how long it took. Decoupled via a callback
+// so transport.ts stays UI-free.
+export interface CueFetchLog {
+  ts: number
+  url: string
+  method: string
+  status: number | null    // null = network failure / aborted
+  ms: number
+  ok: boolean
+  error?: string           // user-friendly summary
+  bytes?: number           // request body size
+}
+
+let logSink: ((entry: CueFetchLog) => void) | null = null
+export function setTransportLogger(sink: ((entry: CueFetchLog) => void) | null): void {
+  logSink = sink
+}
+
+function explainHttp(status: number, body: string): string {
+  if (status === 401) return 'Worker rejected bearer token. Check SHARED_SECRET in phone settings matches the value you set on the Worker.'
+  if (status === 405) return `Worker route exists but rejected the method. Most likely your Worker URL is OLD or wrong — verify it points at your latest deploy. (Body: ${body.slice(0, 80)})`
+  if (status === 404) return 'Worker URL responded but /transcribe route is missing. Re-deploy worker-template/ to pick up the latest endpoint.'
+  if (status === 500) {
+    if (body.includes('DEEPGRAM_API_KEY not configured')) {
+      return 'Worker is missing DEEPGRAM_API_KEY. Run `npx wrangler secret put DEEPGRAM_API_KEY` in worker-template/.'
+    }
+    return `Worker internal error: ${body.slice(0, 120)}`
+  }
+  if (status === 429) return 'Deepgram rate-limited the worker. Slow down or check your Deepgram quota.'
+  if (status >= 500) return `Worker upstream error (${status}): ${body.slice(0, 120)}`
+  if (status === 0) return 'Network failure (CORS, DNS, or no connectivity).'
+  return `HTTP ${status}: ${body.slice(0, 120)}`
+}
+
 // Audio chunking — keep low enough that the user feels live, high enough
 // that Deepgram batch latency + chunk-boundary inaccuracy stays tolerable.
 // 2.5s is the empirical sweet spot for a coaching app where the LLM
@@ -75,12 +111,14 @@ export function createTransport(workerUrl: string, bearerToken: string): CueTran
     chunksFlushed += 1
     const chunk = pending
     pending = new Uint8Array(0)
+    const url = `${baseHttp}/transcribe`
+    const startedAt = Date.now()
     try {
       // Body as Blob, not raw ArrayBuffer — WKWebView's fetch handles
       // Blobs more consistently across iOS versions, especially with
       // CORS preflight where some implementations refuse raw binary.
       const body = new Blob([chunk], { type: 'application/octet-stream' })
-      const resp = await fetch(`${baseHttp}/transcribe`, {
+      const resp = await fetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${bearerToken}`,
@@ -89,18 +127,33 @@ export function createTransport(workerUrl: string, bearerToken: string): CueTran
       })
       if (!resp.ok) {
         const txt = await resp.text().catch(() => '')
+        const friendly = explainHttp(resp.status, txt)
         lastError = `HTTP ${resp.status} ${txt.slice(0, 60)}`
+        logSink?.({
+          ts: startedAt, url, method: 'POST',
+          status: resp.status, ms: Date.now() - startedAt, ok: false,
+          error: friendly, bytes: chunk.byteLength,
+        })
         onErrorCb?.(`transcribe HTTP ${resp.status}: ${txt.slice(0, 80)}`)
         return
       }
       const json = (await resp.json()) as { ok: boolean; text?: string; error?: string }
       if (!json.ok) {
         lastError = `worker said: ${(json.error ?? 'unknown').slice(0, 60)}`
+        logSink?.({
+          ts: startedAt, url, method: 'POST',
+          status: resp.status, ms: Date.now() - startedAt, ok: false,
+          error: json.error ?? 'transcribe failed', bytes: chunk.byteLength,
+        })
         onErrorCb?.(json.error ?? 'transcribe failed')
         return
       }
       chunksOk += 1
       lastError = '' // success — clear stale error
+      logSink?.({
+        ts: startedAt, url, method: 'POST',
+        status: resp.status, ms: Date.now() - startedAt, ok: true, bytes: chunk.byteLength,
+      })
       const text = (json.text ?? '').trim()
       if (text && onTranscriptCb) {
         onTranscriptCb({ type: 'transcript', text, isFinal: true })
@@ -108,6 +161,11 @@ export function createTransport(workerUrl: string, bearerToken: string): CueTran
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       lastError = `network: ${msg.slice(0, 70)}`
+      logSink?.({
+        ts: startedAt, url, method: 'POST',
+        status: null, ms: Date.now() - startedAt, ok: false,
+        error: `Network failure: ${msg.slice(0, 120)}`, bytes: chunk.byteLength,
+      })
       onErrorCb?.(`transcribe network error: ${msg.slice(0, 80)}`)
     } finally {
       inFlight = false

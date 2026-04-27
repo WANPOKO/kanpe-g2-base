@@ -21,7 +21,7 @@ import {
   setWorkerToken,
   setWorkerUrl,
 } from './storage'
-import { createTransport, type CueTransport, type TranscriptEvent } from './transport'
+import { createTransport, setTransportLogger, type CueFetchLog, type CueTransport, type TranscriptEvent } from './transport'
 import {
   batteryHeaderSuffix,
   shouldRequestSuggestion,
@@ -71,6 +71,52 @@ let cachedBatteryLevel: number | undefined
 // One-shot reason string shown on the idle screen after auto-pause.
 // Cleared when the user manually re-engages the mic.
 let autoPausedReason = ''
+
+// Phone-side fetch debug log. Captures every /transcribe + /suggest
+// call so we can see exactly what URL / status / error is happening
+// when mic-on doesn't produce transcripts. In-memory, capped.
+const FETCH_LOG_CAP = 50
+const fetchLog: CueFetchLog[] = []
+function pushFetchLog(entry: CueFetchLog): void {
+  fetchLog.unshift(entry)
+  if (fetchLog.length > FETCH_LOG_CAP) fetchLog.length = FETCH_LOG_CAP
+  renderFetchLog()
+}
+
+function fmtAgo(ts: number): string {
+  const sec = Math.round((Date.now() - ts) / 1000)
+  if (sec < 60) return `${sec}s ago`
+  if (sec < 3600) return `${Math.round(sec / 60)}m ago`
+  return `${Math.round(sec / 3600)}h ago`
+}
+
+function renderFetchLog(): void {
+  if (!fetchLogEl) return
+  if (fetchLog.length === 0) {
+    fetchLogEl.innerHTML = '<div style="color: #7b7b7b;">No fetches yet. Tap to start a mic session — chunks POST to /transcribe every ~2.5s.</div>'
+    return
+  }
+  fetchLogEl.innerHTML = fetchLog
+    .map(e => {
+      const statusBadge = e.ok
+        ? `<span style="color: #2a2;">${e.status ?? '?'}</span>`
+        : `<span style="color: #c00;">${e.status ?? 'NET'}</span>`
+      const ms = `${e.ms}ms`
+      const bytes = e.bytes !== undefined ? ` ${(e.bytes / 1024).toFixed(1)}KB` : ''
+      const err = e.error ? `<div style="color: #c00; margin-top: .15rem;">↳ ${escapeHtml(e.error)}</div>` : ''
+      const url = e.url.length > 70 ? `${e.url.slice(0, 67)}…` : e.url
+      return `<div style="padding: .35rem 0; border-bottom: 1px solid #f0f0f0;">
+        <div style="display: flex; gap: .5rem; align-items: center;">
+          <span style="color: #999; min-width: 6em;">${fmtAgo(e.ts)}</span>
+          ${statusBadge}
+          <span style="color: #555;">${e.method} ${ms}${bytes}</span>
+        </div>
+        <div style="color: #232323; word-break: break-all;">${escapeHtml(url)}</div>
+        ${err}
+      </div>`
+    })
+    .join('')
+}
 
 // --- DOM scaffold (phone-side) ---
 
@@ -141,6 +187,23 @@ root.innerHTML = `
         <button id="save-idle" type="button" style="margin-top: .25rem; padding: .35rem .7rem; cursor: pointer; max-width: 200px;">Save</button>
         <p id="idle-status" style="color: #2a2; font-size: .85em; min-height: 1.2em;"></p>
       </div>
+    </section>
+
+    <section style="margin-top: 2rem;">
+      <details>
+        <summary style="cursor: pointer; color: #232323;">Recent fetches (debug)</summary>
+        <p style="color: #7b7b7b; margin: .5rem 0; font-size: .85em; max-width: 520px;">
+          Last 50 calls to your Worker (/transcribe + /suggest) with status, latency,
+          and any error message. Use this to figure out why mic-on isn't producing
+          transcripts — 405 = wrong/old worker URL, 401 = bearer mismatch,
+          500 with "DEEPGRAM_API_KEY" = worker secret missing.
+        </p>
+        <div style="display: flex; gap: .5rem; margin-bottom: .5rem;">
+          <button id="fetch-log-clear" type="button" style="padding: .35rem .7rem; cursor: pointer; background: #eee;">Clear</button>
+          <button id="fetch-log-refresh" type="button" style="padding: .35rem .7rem; cursor: pointer; background: #eee;">Refresh</button>
+        </div>
+        <div id="fetch-log" style="max-width: 720px; max-height: 320px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: .8em; border: 1px solid #ddd; padding: .5rem;"></div>
+      </details>
     </section>
 
     <section style="margin-top: 2rem; color: #7b7b7b; font-size: .85em;">
@@ -577,6 +640,16 @@ saveCustomBtn.addEventListener('click', async () => {
   saveCustomBtn.textContent = 'Saved ✓'
   window.setTimeout(() => { saveCustomBtn.textContent = 'Save custom prompt' }, 2000)
 })
+
+// Wire fetch log accessors + handlers (must come BEFORE bootstrap so
+// renderFetchLog has a target element when the first chunk fires).
+const fetchLogEl = document.querySelector<HTMLDivElement>('#fetch-log')!
+const fetchLogClearBtn = document.querySelector<HTMLButtonElement>('#fetch-log-clear')!
+const fetchLogRefreshBtn = document.querySelector<HTMLButtonElement>('#fetch-log-refresh')!
+fetchLogClearBtn.addEventListener('click', () => { fetchLog.length = 0; renderFetchLog() })
+fetchLogRefreshBtn.addEventListener('click', () => renderFetchLog())
+setTransportLogger(pushFetchLog)
+renderFetchLog()
 
 saveIdleBtn.addEventListener('click', async () => {
   const raw = Number.parseInt(idleAutoPauseInput.value, 10)
