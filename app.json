@@ -15,7 +15,7 @@
       "name": "network",
       "desc": "Sends audio + transcript context to the personal Cloudflare Worker (which proxies to Deepgram and OpenAI). Worker URL is configured in phone-side settings; the host below is the deployed cue-worker that the .ehpk is allowed to talk to.",
       "whitelist": [
-        "https://cue-worker.tullaipsu.workers.dev"
+        "https://kanpe-g2-worker-wanpoko.azurewind0626.workers.dev"
       ]
     }
   ],
