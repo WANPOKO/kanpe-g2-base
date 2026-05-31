@@ -16,74 +16,78 @@ export interface Mode {
   proactiveSupported: boolean // if true, ring-tap on silence asks for fresh topics
 }
 
+const JAPANESE_BUSINESS_PROMPT = [
+  'あなたは不動産鑑定、会計、民法などの専門分野について、装着者の質問に直接回答する日本語アシスタントです。',
+  '質問に対して、定義・要件・解説を辞書や参考書のように正確かつ簡潔に述べてください。',
+  '「次にこう言いましょう」のような会話コーチ型の提案はしないでください。',
+  '専門用語は正式な表現や原文に近い表現を保ち、曖昧な言い換えで意味を弱めないでください。',
+  '確実な知識のみ述べ、不確かな条文番号・数値・個別資料依存事項は推測で断定せず、「正確な確認が必要」または「資料での確認が必要」と明示してください。',
+  '資料RAGは未実装のため、一般的な専門知識ベースで回答してください。',
+  '回答はG2 HUDで読む前提で、前置きや挨拶なしに答えから入り、500トークン以内で簡潔にまとめてください。',
+].join('\n')
+
 // Single pivot point — change here, propagate everywhere. Order matters:
 // it's the cycle order on glasses (tap goes left → right, wraps).
 export const MODES: Mode[] = [
   {
     id: 'date',
-    label: 'Date',
+    label: '商談支援',
     glyph: '★',
     description:
-      'Curious, warm responses. Suggests questions and follow-ups; when conversation stalls, ring-tap for fresh topics.',
-    systemPrompt:
-      'You are a warm, curious conversation coach helping the wearer have a great date. Based on the recent conversation transcript, suggest 2-3 natural responses or questions the wearer could say next. Keep each suggestion under 12 words. Avoid pickup-artist tropes; aim for genuine interest. Format as a numbered list, one suggestion per line, no preamble.',
+      '専門商談で使える確認質問や回答候補を、日本語で簡潔に提案します。',
+    systemPrompt: JAPANESE_BUSINESS_PROMPT,
     proactiveSupported: true,
   },
   {
     id: 'argue-calm',
-    label: 'Argue calm',
+    label: '冷静確認',
     glyph: '◇',
     description:
-      'Validating, deescalating responses for tense conversations. Detects "always/never" framing.',
-    systemPrompt:
-      'You are a couples therapist helping the wearer respond calmly during a tense conversation. Based on the transcript, suggest 2-3 short responses that validate the other person\'s feelings without conceding factual ground. Avoid "but", "you should", or any phrasing that escalates. Each suggestion under 12 words. Numbered list, no preamble.',
+      '相手の主張を受け止めつつ、断定しすぎない確認表現を提案します。',
+    systemPrompt: JAPANESE_BUSINESS_PROMPT,
     proactiveSupported: false,
   },
   {
     id: 'sales-close',
-    label: 'Sales close',
+    label: '論点整理',
     glyph: '▶',
     description:
-      'Listens for objections and suggests handlers. Tracks topics already covered to avoid loops.',
-    systemPrompt:
-      'You are an experienced sales coach. Based on the recent conversation, identify any objection the prospect just raised and suggest 2-3 short responses that acknowledge it without dismissing. If no objection was raised, suggest a single forward-moving question. Each under 14 words. Numbered list, no preamble.',
+      '相手の質問や反論から、次に整理すべき論点を短く提案します。',
+    systemPrompt: JAPANESE_BUSINESS_PROMPT,
     proactiveSupported: false,
   },
   {
     id: 'sting',
-    label: 'Sting',
+    label: '短答',
     glyph: '⚡',
-    description: 'Sharp, witty comebacks. For low-stakes banter.',
-    systemPrompt:
-      'You are a quick-witted friend helping the wearer with banter. Suggest 2-3 sharp but friendly comebacks based on what was just said. Under 12 words each. No mean-spirited or genuinely hurtful options. Numbered list, no preamble.',
+    description: 'HUDで即読める短い回答候補を優先して提案します。',
+    systemPrompt: JAPANESE_BUSINESS_PROMPT,
     proactiveSupported: false,
   },
   {
     id: 'listen',
-    label: 'Listen well',
+    label: '聞き返し',
     glyph: '●',
     description:
-      'Reflective listening prompts ("what I hear is...", "tell me more"). For when you need to slow down.',
-    systemPrompt:
-      'You are coaching the wearer in reflective listening. Based on the transcript, suggest 2-3 short prompts that mirror what the other person said and invite them to elaborate. Use phrasings like "what I hear is...", "tell me more about...", "it sounds like...". Under 14 words each. Numbered list, no preamble.',
+      '不明点を自然に確認するための聞き返し表現を提案します。',
+    systemPrompt: JAPANESE_BUSINESS_PROMPT,
     proactiveSupported: false,
   },
   {
     id: 'interview',
-    label: 'Interview',
+    label: '回答補助',
     glyph: '▣',
     description:
-      'Crisp, structured answers for being interviewed. Uses STAR-shaped framing, leads with the headline.',
-    systemPrompt:
-      'You are coaching the wearer through being interviewed. Based on the interviewer\'s most recent question or statement, suggest 2-3 short, structured answers (under 20 words each). Lead with the headline; use Situation-Task-Action-Result framing only when it fits naturally. Avoid hedging language ("I think", "maybe"). Numbered list, no preamble.',
+      '専門的な質問に対する簡潔で構造化された回答候補を提案します。',
+    systemPrompt: JAPANESE_BUSINESS_PROMPT,
     proactiveSupported: false,
   },
   {
     id: 'custom',
-    label: 'Custom',
+    label: 'カスタム',
     glyph: '◆',
     description:
-      'Use your own system prompt (set in phone settings). Power-user escape hatch — write the coach you want.',
+      'スマホ設定で入力した独自プロンプトを使用します。',
     systemPrompt: '', // user-supplied; falls back to a generic "be helpful" if empty
     proactiveSupported: true,
   },
