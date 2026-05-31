@@ -33,14 +33,14 @@ interface Env {
 // header on the request handles the protocol switch. Using wss:// here
 // produces a runtime TypeError ("Fetch API cannot load: wss://...") that
 // returns HTTP 500 to the client.
-const DEEPGRAM_WS = 'https://api.deepgram.com/v1/listen?model=nova-2&interim_results=true&encoding=linear16&sample_rate=16000&channels=1'
+const DEEPGRAM_WS = 'https://api.deepgram.com/v1/listen?model=nova-3&language=ja&interim_results=true&encoding=linear16&sample_rate=16000&channels=1'
 // Batch (HTTP) Deepgram endpoint used by /transcribe — same model, no
 // interim results since each call gets one chunk.
 //   diarize=true        → adds speaker:N per word (so plugin can tell
 //                          who is talking — wearer vs other person)
 //   utterances=true     → groups words into speaker turns with start/end
 //   smart_format=true   → cleaner punctuation, numbers, dates
-const DEEPGRAM_HTTP = 'https://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&diarize=true&utterances=true&smart_format=true'
+const DEEPGRAM_HTTP = 'https://api.deepgram.com/v1/listen?model=nova-3&language=ja&punctuate=true&diarize=true&utterances=true&smart_format=true'
 
 const SAMPLE_RATE = 16000
 
@@ -196,13 +196,22 @@ function systemPromptForMode(mode: string): string {
   // Mirror of src/modes.ts on the plugin side. Kept simple — the plugin
   // sends the full prompt for custom mode, but we ship default fallbacks
   // here in case the plugin doesn't pass one.
+  const basePrompt = [
+    'あなたは不動産鑑定、会計、民法などの専門分野について、装着者の質問に直接回答する日本語アシスタントです。',
+    '質問に対して、定義・要件・解説を辞書や参考書のように正確かつ簡潔に述べてください。',
+    '「次にこう言いましょう」のような会話コーチ型の提案はしないでください。',
+    '専門用語は正式な表現や原文に近い表現を保ち、曖昧な言い換えで意味を弱めないでください。',
+    '確実な知識のみ述べ、不確かな条文番号・数値・個別資料依存事項は推測で断定せず、「正確な確認が必要」または「資料での確認が必要」と明示してください。',
+    '資料RAGは未実装のため、一般的な専門知識ベースで回答してください。',
+    '回答はG2 HUDで読む前提で、前置きや挨拶なしに答えから入り、500トークン以内で簡潔にまとめてください。',
+  ].join('\n')
   const PROMPTS: Record<string, string> = {
-    date: 'You are a warm, curious conversation coach. Suggest 2-3 natural responses or questions the wearer could say next. Each under 12 words. Numbered list, no preamble.',
-    'argue-calm': 'You are a couples therapist. Suggest 2-3 short responses that validate the other person\'s feelings. Avoid "but". Each under 12 words. Numbered list, no preamble.',
-    'sales-close': 'You are a sales coach. Suggest 2-3 short responses to any objection raised. Each under 14 words. Numbered list, no preamble.',
-    sting: 'Suggest 2-3 sharp but friendly comebacks under 12 words. Nothing mean. Numbered list, no preamble.',
-    listen: 'Suggest 2-3 short reflective listening prompts ("what I hear is...", "tell me more about..."). Under 14 words. Numbered list, no preamble.',
-    interview: 'You are coaching the wearer through being interviewed. Based on the interviewer\'s most recent question, suggest 2-3 short structured answers (under 20 words). Lead with the headline; STAR framing only when natural. Avoid hedging language. Numbered list, no preamble.',
+    date: basePrompt,
+    'argue-calm': basePrompt,
+    'sales-close': basePrompt,
+    sting: basePrompt,
+    listen: basePrompt,
+    interview: basePrompt,
   }
   return PROMPTS[mode] ?? PROMPTS.date!
 }
@@ -220,13 +229,13 @@ async function callAnthropic(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'claude-haiku-4-5',
-      max_tokens: 200,
+      model: 'claude-opus-4-7',
+      max_tokens: 500,
       system: systemPrompt,
       messages: [
         {
           role: 'user',
-          content: `Recent conversation transcript (the other person's voice):\n\n"${transcript}"\n\nSuggestions:`,
+          content: `以下はユーザーからの質問です。\n\n"${transcript}"\n\nこの質問に対して、専門用語を正確に保ちながら日本語で直接回答してください。`,
         },
       ],
     }),
