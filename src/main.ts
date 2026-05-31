@@ -157,92 +157,87 @@ if (!root) throw new Error('App root missing')
 
 root.innerHTML = `
   <main style="font-family: system-ui; padding: 1rem; max-width: 720px; margin: 0 auto; color: #232323;">
-    <h1 style="margin: 0 0 .25rem 0;">Cue <span style="font-size: .55em; color: #7b7b7b; font-weight: 400;">v${__APP_VERSION__}</span></h1>
-    <p style="color: #7b7b7b; margin: 0 0 1rem 0;">Helps you say the right thing.</p>
-    <p id="status" style="margin: 0 0 1rem 0;">Connecting…</p>
+    <h1 style="margin: 0 0 .25rem 0;">kanpe-g2 <span style="font-size: .55em; color: #7b7b7b; font-weight: 400;">v${__APP_VERSION__}</span></h1>
+    <p style="color: #7b7b7b; margin: 0 0 1rem 0;">専門商談の即時回答をG2に表示します。</p>
+    <p id="status" style="margin: 0 0 1rem 0;">接続中…</p>
 
     <div id="privacy-modal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); align-items: center; justify-content: center; z-index: 100;">
       <div style="background: #fff; max-width: 520px; padding: 1.5rem; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,.3);">
-        <h2 style="margin: 0 0 .5rem 0;">Before you start</h2>
+        <h2 style="margin: 0 0 .5rem 0;">開始前の確認</h2>
         <p>
-          Cue records audio from the glasses microphone to suggest responses.
-          Audio streams to a transcription service and is dropped — Cue never
-          stores recordings.
+          kanpe-g2 はG2のマイク音声を文字起こしし、回答候補を表示します。
+          音声は文字起こしサービスへ送信されますが、録音ファイルとして保存しません。
         </p>
         <p style="font-weight: 600;">
-          You are responsible for ensuring this is legal where you are.
-          Recording someone without their knowledge is illegal in some
-          jurisdictions (CA, FL, IL, MD, MA, MT, NH, PA, WA in the US, and
-          many countries).
+          利用場所の法令・同意要件はユーザー自身で確認してください。
+          相手に知らせない録音や音声処理が違法または不適切となる場合があります。
         </p>
         <p>
-          The mic is OFF by default and requires explicit opt-in each
-          session. The mic indicator stays visible whenever Cue is listening.
+          マイクは初期状態でOFFです。マイク動作中はG2上に状態表示を出します。
         </p>
         <div style="display: flex; gap: .5rem; justify-content: flex-end; margin-top: 1rem;">
-          <button id="privacy-decline" type="button" style="padding: .5rem 1rem; cursor: pointer; background: #eee;">No thanks</button>
-          <button id="privacy-accept" type="button" style="padding: .5rem 1rem; cursor: pointer; background: #232323; color: #fff;">I understand — continue</button>
+          <button id="privacy-decline" type="button" style="padding: .5rem 1rem; cursor: pointer; background: #eee;">中止</button>
+          <button id="privacy-accept" type="button" style="padding: .5rem 1rem; cursor: pointer; background: #232323; color: #fff;">理解して続行</button>
         </div>
       </div>
     </div>
 
     <section>
-      <h2 style="font-size: 1.1em; margin: 1rem 0 .5rem 0;">Mode</h2>
+      <h2 style="font-size: 1.1em; margin: 1rem 0 .5rem 0;">モード</h2>
       <div id="mode-list" style="display: grid; gap: .5rem; max-width: 520px;"></div>
     </section>
 
     <section>
-      <h2 style="font-size: 1.1em; margin: 1.5rem 0 .5rem 0;">Custom prompt (used when Mode = Custom)</h2>
-      <textarea id="custom-prompt" rows="4" style="width: 100%; max-width: 520px; padding: .5rem; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: .9em;" placeholder="You are a... Suggest 2-3 short responses, numbered, no preamble."></textarea>
-      <button id="save-custom" type="button" style="margin-top: .35rem; padding: .35rem .7rem; cursor: pointer;">Save custom prompt</button>
+      <h2 style="font-size: 1.1em; margin: 1.5rem 0 .5rem 0;">カスタムプロンプト（モード=カスタム時）</h2>
+      <textarea id="custom-prompt" rows="4" style="width: 100%; max-width: 520px; padding: .5rem; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: .9em;" placeholder="専門商談向けに、短い日本語回答を2〜3個提案してください。"></textarea>
+      <button id="save-custom" type="button" style="margin-top: .35rem; padding: .35rem .7rem; cursor: pointer;">保存</button>
     </section>
 
     <section>
-      <h2 style="font-size: 1.1em; margin: 1.5rem 0 .5rem 0;">Worker (v0.2.0+)</h2>
+      <h2 style="font-size: 1.1em; margin: 1.5rem 0 .5rem 0;">Worker設定</h2>
       <p style="color: #7b7b7b; font-size: .9em; max-width: 520px;">
-        v0.1.0 uses MOCK suggestions on a timer — no API keys needed.
-        v0.2.0 onwards routes mic audio through your personal Cloudflare Worker
-        for real STT + LLM. Set those credentials here in advance.
+        実際のSTT + LLMは個人用Cloudflare Worker経由で動作します。
+        Worker URL と Bearer token を事前に設定してください。
       </p>
       <div style="display: grid; gap: .25rem; max-width: 520px;">
-        <label>Worker URL <input id="worker-url" type="url" placeholder="https://cue-worker.your-sub.workers.dev" style="padding: .35rem; width: 100%; box-sizing: border-box;" /></label>
-        <label>Bearer token <input id="worker-token" type="password" placeholder="(SHARED_SECRET from Worker)" style="padding: .35rem; width: 100%; box-sizing: border-box; font-family: monospace;" /></label>
-        <button id="save-worker" type="button" style="margin-top: .25rem; padding: .35rem .7rem; cursor: pointer; max-width: 200px;">Save Worker config</button>
+        <label>Worker URL <input id="worker-url" type="url" placeholder="https://kanpe-g2-worker.example.workers.dev" style="padding: .35rem; width: 100%; box-sizing: border-box;" /></label>
+        <label>Bearer token <input id="worker-token" type="password" placeholder="WorkerのSHARED_SECRET" style="padding: .35rem; width: 100%; box-sizing: border-box; font-family: monospace;" /></label>
+        <button id="save-worker" type="button" style="margin-top: .25rem; padding: .35rem .7rem; cursor: pointer; max-width: 200px;">Worker設定を保存</button>
         <p id="worker-status" style="color: #2a2; font-size: .85em; min-height: 1.2em;"></p>
       </div>
     </section>
 
     <section>
-      <h2 style="font-size: 1.1em; margin: 1.5rem 0 .5rem 0;">Behavior</h2>
+      <h2 style="font-size: 1.1em; margin: 1.5rem 0 .5rem 0;">動作設定</h2>
       <div style="display: grid; gap: .5rem; max-width: 520px;">
-        <label>Auto-pause after idle (minutes; 0 disables) <input id="idle-auto-pause-min" type="number" min="0" step="1" style="padding: .35rem; width: 6em; box-sizing: border-box;" /></label>
-        <button id="save-idle" type="button" style="padding: .35rem .7rem; cursor: pointer; max-width: 200px;">Save</button>
+        <label>無音時の自動停止（分、0で無効） <input id="idle-auto-pause-min" type="number" min="0" step="1" style="padding: .35rem; width: 6em; box-sizing: border-box;" /></label>
+        <button id="save-idle" type="button" style="padding: .35rem .7rem; cursor: pointer; max-width: 200px;">保存</button>
         <p id="idle-status" style="color: #2a2; font-size: .85em; min-height: 1.2em; margin: 0;"></p>
 
         <hr style="border: 0; border-top: 1px solid #eee; margin: .5rem 0;" />
 
         <label style="display: flex; align-items: center; gap: .5rem; cursor: pointer;">
           <input id="show-debug-overlay" type="checkbox" />
-          Show diagnostic overlay on glasses (audio frames / chunks / errors)
+          G2に診断表示を出す（音声フレーム / chunk / error）
         </label>
-        <p style="color: #7b7b7b; font-size: .85em; margin: 0;">Off by default. Turn on when something isn't working and you want to see what's happening on-glasses.</p>
+        <p style="color: #7b7b7b; font-size: .85em; margin: 0;">通常はOFF。マイクや通信が動かない時の切り分け用です。</p>
 
         <hr style="border: 0; border-top: 1px solid #eee; margin: .5rem 0;" />
 
-        <label>Which speaker is you?
+        <label>自分の話者ID
           <select id="wearer-speaker-id" style="padding: .35rem; margin-left: .5rem;">
-            <option value="-1">None / auto-detect (don't filter)</option>
-            <option value="0">Speaker A is me</option>
-            <option value="1">Speaker B is me</option>
-            <option value="2">Speaker C is me</option>
-            <option value="3">Speaker D is me</option>
+            <option value="-1">未指定 / 自動（除外しない）</option>
+            <option value="0">話者Aが自分</option>
+            <option value="1">話者Bが自分</option>
+            <option value="2">話者Cが自分</option>
+            <option value="3">話者Dが自分</option>
           </select>
         </label>
-        <p style="color: #7b7b7b; font-size: .85em; margin: 0;">When set, your own speech is shown but excluded from the suggestion prompt — Cue suggests responses TO the other person, not echoes of you. Watch the glasses for [A]/[B]/etc labels in a real conversation, then pick yours.</p>
+        <p style="color: #7b7b7b; font-size: .85em; margin: 0;">設定すると自分の発話は表示のみ行い、回答生成の入力から除外します。G2上の[A]/[B]表示を見て選択してください。</p>
         <p id="wearer-status" style="color: #2a2; font-size: .85em; min-height: 1.2em; margin: 0;"></p>
 
-        <button id="calibrate-me" type="button" style="padding: .35rem .7rem; cursor: pointer; max-width: 220px; margin-top: .25rem;">Calibrate me (one-tap)</button>
-        <p style="color: #7b7b7b; font-size: .85em; margin: 0;">Tap, put on glasses, say "this is me" — the next utterance Deepgram detects becomes your speaker ID. Replaces the dropdown above.</p>
+        <button id="calibrate-me" type="button" style="padding: .35rem .7rem; cursor: pointer; max-width: 220px; margin-top: .25rem;">自分の声を登録</button>
+        <p style="color: #7b7b7b; font-size: .85em; margin: 0;">押した後にG2をかけて短く発話すると、次に検出された話者IDを自分として保存します。</p>
         <p id="calibrate-status" style="color: #2a2; font-size: .85em; min-height: 1.2em; margin: 0;"></p>
       </div>
     </section>
@@ -316,7 +311,7 @@ calibrateBtn.addEventListener('click', async () => {
   await setCalibrating(true)
   calibratingNow = true
   calibrateStatus.style.color = '#2a2'
-  calibrateStatus.textContent = 'Listening for your voice — say "this is me" within ~10s.'
+  calibrateStatus.textContent = '自分の声を登録中です。10秒以内に短く発話してください。'
   window.setTimeout(() => { calibrateStatus.textContent = '' }, 12_000)
 })
 
@@ -332,8 +327,8 @@ wearerSpeakerSelect.addEventListener('change', async () => {
   await setWearerSpeakerId(wearerSpeakerId)
   wearerStatus.style.color = '#2a2'
   wearerStatus.textContent = wearerSpeakerId < 0
-    ? 'Auto-detect: no filter applied; suggestions consider all speech.'
-    : `Speaker ${speakerLabel(wearerSpeakerId)} = you. Your lines won't be sent to the suggestion model.`
+    ? '自動設定です。発話の除外は行いません。'
+    : `話者${speakerLabel(wearerSpeakerId)}を自分として扱います。自分の発話は回答生成から除外します。`
   window.setTimeout(() => { wearerStatus.textContent = '' }, 5000)
   void paint()
 })
@@ -406,22 +401,21 @@ function renderGlasses(): string {
   const micGlyph = micOn ? '●' : '○'
   const battery = batteryHeaderSuffix(cachedBatteryLevel)
   // Header is fixed-width-ish: mode label left, mic state center, battery right.
-  const header = `${mode.glyph} ${mode.label.toUpperCase()}  ${micGlyph} ${micOn ? 'LIVE' : 'mic off'}${battery ? `  ${battery}` : ''}`
+  const header = `${mode.glyph} ${mode.label}  ${micGlyph} ${micOn ? '聞取中' : 'マイクOFF'}${battery ? `  ${battery}` : ''}`
   if (!agreedToPrivacy) {
     return [
       header,
       '',
-      'Cue needs your consent before',
-      'turning on the mic. Open Cue',
-      'on your phone first to review',
-      'and accept the privacy notice.',
+      'マイク利用の確認が必要です。',
+      'スマホ側で内容を確認し、',
+      '同意してから開始してください。',
     ].join('\n')
   }
   if (!micOn) {
     const idleLines: string[] = [
       header,
       '',
-      `Mode: ${mode.label}`,
+      `モード: ${mode.label}`,
       mode.description.length > 64 ? trunc(mode.description, 64) : mode.description,
       '',
     ]
@@ -429,9 +423,9 @@ function renderGlasses(): string {
       idleLines.push(autoPausedReason)
       idleLines.push('')
     }
-    idleLines.push(`${isRealMode ? '◉ live' : '◌ mock'} ready`)
-    idleLines.push('[tap] start mic')
-    idleLines.push('[2x] cycle mode')
+    idleLines.push(`${isRealMode ? '◉ 本番' : '◌ 模擬'} 待機中`)
+    idleLines.push('[tap] マイク開始')
+    idleLines.push('[2x] モード切替')
     return idleLines.join('\n')
   }
   // Live view.
@@ -451,7 +445,7 @@ function renderGlasses(): string {
     // Mock mode + early frames before any conversation turn lands.
     lines.push(trunc(lastTranscript, 100))
   } else {
-    lines.push(proactiveActive ? 'Fresh topics:' : 'Listening…')
+    lines.push(proactiveActive ? '新しい論点:' : '聞き取り中…')
   }
   // Diagnostic stats — gated on showDebugOverlay. Default OFF; toggle
   // on via phone-side "Show diagnostic overlay on glasses." Same info
@@ -477,10 +471,10 @@ function renderGlasses(): string {
       })
     })
   } else {
-    lines.push('(suggestions appear here)')
+    lines.push('（回答候補を表示します）')
   }
   lines.push('')
-  lines.push(mode.proactiveSupported ? '[ring 2x] topics  [tap] mic' : '[tap] toggle mic')
+  lines.push(mode.proactiveSupported ? '[ring 2x] 論点  [tap] マイク' : '[tap] マイク切替')
   return lines.join('\n')
 }
 
@@ -597,7 +591,7 @@ async function micTick(): Promise<void> {
   // Idle auto-pause: no non-empty transcript for idleAutoPauseMs.
   // 0 disables — user can opt out via phone settings.
   if (idleAutoPauseMs > 0 && now - lastTranscriptAt > idleAutoPauseMs) {
-    autoPausedReason = `Auto-paused after ${Math.round(idleAutoPauseMs / 60_000)} min idle`
+    autoPausedReason = `${Math.round(idleAutoPauseMs / 60_000)}分無音のため自動停止`
     await toggleMic() // turns mic off + repaints
     return
   }
@@ -630,7 +624,7 @@ async function startRealSession(): Promise<void> {
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    lastTranscript = `(real-mode unavailable: ${msg.slice(0, 80)})`
+    lastTranscript = `(本番モード不可: ${msg.slice(0, 80)})`
     // eslint-disable-next-line no-console
     console.error('[cue] real-mode startMicSession failed:', msg)
     isRealMode = false
@@ -645,7 +639,7 @@ async function startRealSession(): Promise<void> {
     transport?.sendAudioFrame(frame)
   })
   if (!ok) {
-    lastTranscript = '(mic permission denied)'
+    lastTranscript = '（マイク許可がありません）'
     isRealMode = false
     await transport.endMicSession()
     resetMock()
@@ -653,7 +647,7 @@ async function startRealSession(): Promise<void> {
     await paint()
     return
   }
-  lastTranscript = '(listening — say something)'
+  lastTranscript = '（聞き取り中です。発話してください）'
   await paint()
 }
 
@@ -819,15 +813,15 @@ privacyAccept.addEventListener('click', async () => {
 })
 privacyDecline.addEventListener('click', () => {
   privacyModal.style.display = 'none'
-  status.textContent = 'Privacy notice declined. You can re-open Cue anytime to accept.'
+  status.textContent = '同意しませんでした。再起動後にいつでも同意できます。'
 })
 
 // --- form handlers ---
 
 saveCustomBtn.addEventListener('click', async () => {
   await setCustomPrompt(customPromptInput.value)
-  saveCustomBtn.textContent = 'Saved ✓'
-  window.setTimeout(() => { saveCustomBtn.textContent = 'Save custom prompt' }, 2000)
+  saveCustomBtn.textContent = '保存済み ✓'
+  window.setTimeout(() => { saveCustomBtn.textContent = '保存' }, 2000)
 })
 
 // Wire fetch log accessors + handlers (must come BEFORE bootstrap so
@@ -901,8 +895,8 @@ saveIdleBtn.addEventListener('click', async () => {
   idleAutoPauseInput.value = String(min)
   idleStatus.style.color = '#2a2'
   idleStatus.textContent = min === 0
-    ? 'Saved. Auto-pause disabled.'
-    : `Saved. Mic will auto-pause after ${min} min idle.`
+    ? '保存しました。自動停止は無効です。'
+    : `保存しました。${min}分無音でマイクを自動停止します。`
   window.setTimeout(() => { idleStatus.textContent = '' }, 4000)
 })
 
@@ -914,8 +908,8 @@ saveWorkerBtn.addEventListener('click', async () => {
   isRealMode = transport.ready
   workerStatus.style.color = '#2a2'
   workerStatus.textContent = isRealMode
-    ? 'Saved. Real STT + LLM active on next mic session.'
-    : 'Saved (URL + token incomplete — mock mode will run).'
+    ? '保存しました。次回マイク開始時から本番STT + LLMを使います。'
+    : '保存しました。URLまたはtoken未入力のため模擬モードで動きます。'
   window.setTimeout(() => { workerStatus.textContent = '' }, 4000)
   // Force an immediate glasses repaint so the ◉ live / ◌ mock indicator
   // reflects the new state without waiting for the next user gesture.
@@ -927,8 +921,8 @@ saveWorkerBtn.addEventListener('click', async () => {
 async function bootstrap(): Promise<void> {
   // eslint-disable-next-line no-console
   console.log('[cue] bootstrap start')
-  status.textContent = 'Connecting to glasses…'
-  even = await connectEvenRuntime(`Cue v${__APP_VERSION__}\n\nLoading…`)
+  status.textContent = 'G2に接続中…'
+  even = await connectEvenRuntime(`kanpe-g2 v${__APP_VERSION__}\n\n読み込み中…`)
 
   if (even) {
     setStorageBridge({ getStorage: even.getStorage, setStorage: even.setStorage })
@@ -973,12 +967,12 @@ async function bootstrap(): Promise<void> {
   }
 
   if (!even) {
-    status.textContent = 'Running outside the Even runtime — browser preview only.'
+    status.textContent = 'Even runtime外で実行中です。ブラウザプレビューのみです。'
     return
   }
   status.textContent = agreedToPrivacy
-    ? 'Glasses connected. Use them to start a session.'
-    : 'Glasses connected. Accept the privacy notice to enable mic.'
+    ? 'G2接続済み。G2操作でセッションを開始できます。'
+    : 'G2接続済み。マイク利用には確認への同意が必要です。'
 
   even.onTap(onTap)
   even.onSwipe(onSwipe)
