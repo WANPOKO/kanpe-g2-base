@@ -261,7 +261,7 @@ export function createTransport(workerUrl: string, bearerToken: string): CueTran
     async requestSuggestions({ mode, transcript, customPrompt, recentSuggestions }) {
       if (!ready) return { ok: false as const, error: 'Worker not configured' }
       const ctrl = new AbortController()
-      const timer = setTimeout(() => ctrl.abort(), 12_000)
+      const timer = setTimeout(() => ctrl.abort(), 30_000)
       try {
         const resp = await fetch(`${baseHttp}/suggest`, {
           method: 'POST',
