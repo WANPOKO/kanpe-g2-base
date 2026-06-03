@@ -36,7 +36,6 @@ import {
   appendTurn,
   batteryHeaderSuffix,
   pruneTurns,
-  shouldRequestSuggestion,
   speakerLabel,
   trimToSentences,
   wrapWords,
@@ -48,6 +47,122 @@ import {
 let even: EvenRuntime | null = null
 let currentMode: ModeId = DEFAULT_MODE
 let micOn = false
+
+type AppState = 'off' | 'waiting' | 'active' | 'processing' | 'answer_display'
+type CommandType = 'start' | 'end' | 'next' | 'prev' | 'repeat' | 'finish'
+
+type VoiceCommand = {
+  type: CommandType
+  phrases: string[]
+}
+
+const DEFAULT_VOICE_COMMANDS: readonly VoiceCommand[] = [
+  { type: 'start', phrases: ['では確認しましょう'] },
+  { type: 'end', phrases: ['ありがとうございました'] },
+  { type: 'next', phrases: ['次'] },
+  { type: 'prev', phrases: ['戻って'] },
+  { type: 'repeat', phrases: ['もう一度'] },
+  { type: 'finish', phrases: ['終わり'] },
+]
+
+function normalizeCommandText(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\u3000]/g, '')
+    .replace(/[。、，．.,!！?？「」『』（）()【】\[\]{}]/g, '')
+}
+
+function detectVoiceCommand(
+  text: string,
+  commands: readonly VoiceCommand[] = DEFAULT_VOICE_COMMANDS,
+): CommandType | null {
+  const normalizedText = normalizeCommandText(text)
+  if (!normalizedText) return null
+
+  for (const command of commands) {
+    for (const phrase of command.phrases) {
+      const normalizedPhrase = normalizeCommandText(phrase)
+      if (!normalizedPhrase) continue
+      if (normalizedText === normalizedPhrase) return command.type
+      if (normalizedPhrase.length > 1 && normalizedText.includes(normalizedPhrase)) return command.type
+    }
+  }
+  return null
+}
+
+function splitLongSegment(segment: string, maxChars: number): string[] {
+  const pages: string[] = []
+  for (let start = 0; start < segment.length; start += maxChars) {
+    const page = segment.slice(start, start + maxChars).trim()
+    if (page) pages.push(page)
+  }
+  return pages
+}
+
+function splitAnswerPages(text: string, maxChars = MAX_CHARS_PER_ANSWER_PAGE): string[] {
+  const normalized = text.replace(/\r\n/g, '\n').trim()
+  if (!normalized) return []
+
+  const segments = normalized
+    .split(/(?<=[。、\n])/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+
+  const pages: string[] = []
+  let current = ''
+
+  for (const segment of segments) {
+    if (segment.length > maxChars) {
+      if (current) {
+        pages.push(current)
+        current = ''
+      }
+      pages.push(...splitLongSegment(segment, maxChars))
+      continue
+    }
+
+    const next = current ? `${current}${segment}` : segment
+    if (next.length <= maxChars) {
+      current = next
+      continue
+    }
+
+    if (current) pages.push(current)
+    current = segment
+  }
+
+  if (current) pages.push(current)
+  return pages
+}
+
+function handleAnswerDisplayCommand(command: CommandType): boolean {
+  switch (command) {
+    case 'next':
+      answerPageIndex = Math.min(answerPageIndex + 1, Math.max(answerPages.length - 1, 0))
+      return true
+    case 'prev':
+      answerPageIndex = Math.max(answerPageIndex - 1, 0)
+      return true
+    case 'repeat':
+      return true
+    case 'finish':
+      answerPages = []
+      answerPageIndex = 0
+      questionBuffer = ''
+      appState = 'active'
+      return true
+    case 'start':
+    case 'end':
+      return false
+  }
+}
+
+let appState: AppState = 'off'
+let questionBuffer = ''
+let answerPages: string[] = []
+let answerPageIndex = 0
+
 let agreedToPrivacy = false
 let lastTranscript = ''
 let suggestions: string[] = []
@@ -65,6 +180,10 @@ const TRANSCRIPT_WINDOW_CHARS = 1500
 // How often the mic-tick fires while listening. 1s is fast enough to feel
 // reactive on a sentence-final pause, slow enough not to hammer BLE.
 const MIC_TICK_MS = 1_000
+const QUESTION_SILENCE_MS = 2_000
+// Real glasses confirmed the answer-only HUD still had room at 150 chars.
+// Re-test from 200 chars; increase later if real-device testing still shows room.
+const MAX_CHARS_PER_ANSWER_PAGE = 200
 // Auto-pause after this much idle. Idle = no non-empty transcript chunk.
 // 0 disables. Sourced from phone settings on bootstrap; falls back to default.
 let idleAutoPauseMs = DEFAULT_IDLE_AUTO_PAUSE_MIN * 60_000
@@ -72,10 +191,7 @@ let idleAutoPauseMs = DEFAULT_IDLE_AUTO_PAUSE_MIN * 60_000
 let transport: CueTransport | null = null
 let isRealMode = false // true when transport.ready (Worker configured)
 let liveTranscript = '' // accumulated final transcripts
-let lastSuggestionAt = 0
 let suggestionInFlight = false
-// Tracking for shouldRequestSuggestion — set on each non-empty transcript chunk.
-let lastChunkText = ''
 let lastChunkAt = 0
 // Tracking for idle auto-pause — set on every non-empty transcript chunk
 // AND on mic-on (so the timer doesn't fire instantly on a quiet start).
@@ -396,6 +512,16 @@ function emphasizeFirstWord(s: string): string {
   return `${first!.toUpperCase()}${rest ?? ''}`
 }
 
+function renderAnswerDisplay(): string {
+  const page = answerPages[answerPageIndex] ?? ''
+  const total = Math.max(answerPages.length, 1)
+  return [
+    page || '（回答なし）',
+    '',
+    `${answerPageIndex + 1}/${total}`,
+  ].join('\n')
+}
+
 function renderGlasses(): string {
   const mode: Mode = modeById(currentMode)
   const micGlyph = micOn ? '●' : '○'
@@ -428,6 +554,7 @@ function renderGlasses(): string {
     idleLines.push('[2x] モード切替')
     return idleLines.join('\n')
   }
+  if (appState === 'answer_display') return renderAnswerDisplay()
   // Live view.
   const lines: string[] = [header, '']
   // v0.4.0: render up to MAX_DISPLAYED_TURNS of the rolling conversation
@@ -481,8 +608,9 @@ function renderGlasses(): string {
 async function paint(): Promise<void> {
   if (!even) return
   const tag = !agreedToPrivacy ? 'gate' : !micOn ? 'idle' : proactiveActive ? 'proactive' : 'live'
+  const week1State = `${appState} q=${questionBuffer.length} pages=${answerPageIndex + 1}/${Math.max(answerPages.length, 1)}`
   // eslint-disable-next-line no-console
-  console.log(`[cue:state] mode=${currentMode} mic=${micOn ? 'on' : 'off'} stage=${tag} suggestions=${suggestions.length}`)
+  console.log(`[cue:state] mode=${currentMode} mic=${micOn ? 'on' : 'off'} stage=${tag} week1=${week1State} suggestions=${suggestions.length}`)
   await even.render(renderGlasses())
 }
 
@@ -531,6 +659,10 @@ async function showProactiveTopics(): Promise<void> {
 async function toggleMic(): Promise<void> {
   if (!agreedToPrivacy) return
   micOn = !micOn
+  appState = micOn ? 'active' : 'off'
+  questionBuffer = ''
+  answerPages = []
+  answerPageIndex = 0
   suggestions = []
   lastTranscript = ''
   liveTranscript = ''
@@ -540,7 +672,6 @@ async function toggleMic(): Promise<void> {
     autoPausedReason = ''
     lastTranscriptAt = Date.now()
     lastChunkAt = Date.now()
-    lastChunkText = ''
     // v0.4.3: start a new session record; reset counters
     sessionStartedAt = Date.now()
     sessionSuggestionCount = 0
@@ -610,7 +741,6 @@ async function micTick(): Promise<void> {
 async function startRealSession(): Promise<void> {
   if (!transport || !even) return
   liveTranscript = ''
-  lastSuggestionAt = 0
   // Transport now uses chunked HTTP POST instead of WebSocket (the WebView
   // blocks outbound WS handshakes — see transport.ts header comment).
   // startMicSession throws on worker-unreachable / probe-failed; per-chunk
@@ -652,6 +782,19 @@ async function startRealSession(): Promise<void> {
 }
 
 function onTranscriptFrame(e: TranscriptEvent): void {
+  const detectedCommand = detectVoiceCommand(e.text)
+  if (detectedCommand) {
+    // eslint-disable-next-line no-console
+    console.log(`[cue:command] detected=${detectedCommand} text=${e.text}`)
+  }
+  if (appState === 'answer_display') {
+    if (detectedCommand) {
+      handleAnswerDisplayCommand(detectedCommand)
+      void paint()
+    }
+    return
+  }
+
   // v0.4.0: prefer per-speaker utterances when available so we can show
   // [A]/[B] labels and exclude the wearer's own words from the suggestion
   // prompt. Falls back to whole-chunk text when the worker / Deepgram
@@ -688,19 +831,23 @@ function onTranscriptFrame(e: TranscriptEvent): void {
   // (so suggestions are responses TO the other person, not echoes of
   // what the wearer just said).
   if (e.isFinal) {
+    const questionText = e.text.trim()
+    if (!detectedCommand && questionText.length > 0) {
+      questionBuffer = trimToSentences(`${questionBuffer} ${questionText}`, TRANSCRIPT_WINDOW_CHARS)
+      lastChunkAt = Date.now()
+    }
+
     const otherLines = turns
       .filter(t => wearerSpeakerId < 0 || t.speaker !== wearerSpeakerId)
       .map(t => t.text)
       .join(' ')
     if (otherLines.trim().length > 0) {
       liveTranscript = trimToSentences(`${liveTranscript} ${otherLines}`, TRANSCRIPT_WINDOW_CHARS)
-      lastChunkText = otherLines
       lastChunkAt = Date.now()
     }
     // Idle auto-pause is "any speech," not "other-only" — we don't want
     // a wearer-only chunk to be considered idle.
     if (e.text.trim().length > 0) lastTranscriptAt = Date.now()
-    void maybeRequestSuggestions()
   }
   // Keep lastTranscript for the (now-deprecated) single-line fallback,
   // but renderGlasses now reads from `conversation` directly.
@@ -710,31 +857,30 @@ function onTranscriptFrame(e: TranscriptEvent): void {
 
 async function maybeRequestSuggestions(): Promise<void> {
   if (!transport || !isRealMode) return
-  const fire = shouldRequestSuggestion(
-    {
-      lastChunkText,
-      lastChunkAt,
-      lastSuggestionAt,
-      inFlight: suggestionInFlight,
-      transcriptLen: liveTranscript.length,
-    },
-    Date.now(),
-  )
-  if (!fire) return
+  if (appState !== 'active') return
+  if (suggestionInFlight) return
+  const question = questionBuffer.trim()
+  if (!question) return
+  if (Date.now() - lastChunkAt < QUESTION_SILENCE_MS) return
+
+  appState = 'processing'
   suggestionInFlight = true
-  lastSuggestionAt = Date.now()
   sessionSuggestionCount += 1
   try {
     const customPrompt = currentMode === 'custom' ? await getCustomPrompt() : undefined
     const result = await transport.requestSuggestions({
       mode: currentMode,
-      transcript: liveTranscript,
+      transcript: question,
       customPrompt,
       // v0.4.2: send recent suggestions so worker can dedupe — no LLM
       // re-emitting the same advice 3 times in a row.
       recentSuggestions: recentSuggestionsRing.slice(),
     })
     if (result.ok) {
+      const answerText = result.suggestions.join('\n').trim()
+      answerPages = splitAnswerPages(answerText)
+      answerPageIndex = 0
+      appState = 'answer_display'
       suggestions = result.suggestions
       // Track the new suggestions for next-call dedupe.
       for (const s of result.suggestions) {
@@ -744,11 +890,15 @@ async function maybeRequestSuggestions(): Promise<void> {
         recentSuggestionsRing.shift()
       }
     } else {
+      answerPages = []
+      answerPageIndex = 0
       suggestions = [`(LLM error: ${result.error.slice(0, 40)})`]
     }
     await paint()
   } finally {
     suggestionInFlight = false
+    questionBuffer = ''
+    if (appState === 'processing') appState = micOn ? 'active' : 'off'
   }
 }
 
