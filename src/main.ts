@@ -136,6 +136,18 @@ function splitAnswerPages(text: string, maxChars = MAX_CHARS_PER_ANSWER_PAGE): s
   return pages
 }
 
+function clearSessionState(): void {
+  questionBuffer = ''
+  answerPages = []
+  answerPageIndex = 0
+  suggestions = []
+  liveTranscript = ''
+  lastTranscript = ''
+  proactiveActive = false
+  conversation.length = 0
+  recentSuggestionsRing.length = 0
+}
+
 function handleAnswerDisplayCommand(command: CommandType): boolean {
   switch (command) {
     case 'next':
@@ -184,6 +196,11 @@ const QUESTION_SILENCE_MS = 2_000
 // Real glasses confirmed the answer-only HUD still had room at 150 chars.
 // Re-test from 200 chars; increase later if real-device testing still shows room.
 const MAX_CHARS_PER_ANSWER_PAGE = 200
+const GLASSES_CLEAR_TEXT = ' '.repeat(240)
+// Set false before production use: the temporary trigger design must not
+// let glasses temple taps start kanpe-g2. Emergency recovery is phone-side;
+// a future left+right simultaneous tap fallback is a separate design item.
+const DEV_TAP_ENABLED = true
 // Auto-pause after this much idle. Idle = no non-empty transcript chunk.
 // 0 disables. Sourced from phone settings on bootstrap; falls back to default.
 let idleAutoPauseMs = DEFAULT_IDLE_AUTO_PAUSE_MIN * 60_000
@@ -198,6 +215,7 @@ let lastChunkAt = 0
 let lastTranscriptAt = 0
 // Cached so renderGlasses doesn't have to await. Refreshed on the mic tick.
 let cachedBatteryLevel: number | undefined
+let batteryRefreshInFlight = false
 // One-shot reason string shown on the idle screen after auto-pause.
 // Cleared when the user manually re-engages the mic.
 let autoPausedReason = ''
@@ -528,6 +546,8 @@ function renderGlasses(): string {
   const battery = batteryHeaderSuffix(cachedBatteryLevel)
   // Header is fixed-width-ish: mode label left, mic state center, battery right.
   const header = `${mode.glyph} ${mode.label}  ${micGlyph} ${micOn ? '聞取中' : 'マイクOFF'}${battery ? `  ${battery}` : ''}`
+  if (appState === 'off' && micOn) return GLASSES_CLEAR_TEXT
+  if (appState === 'waiting' && micOn) return GLASSES_CLEAR_TEXT
   if (!agreedToPrivacy) {
     return [
       header,
@@ -607,11 +627,21 @@ function renderGlasses(): string {
 
 async function paint(): Promise<void> {
   if (!even) return
-  const tag = !agreedToPrivacy ? 'gate' : !micOn ? 'idle' : proactiveActive ? 'proactive' : 'live'
-  const week1State = `${appState} q=${questionBuffer.length} pages=${answerPageIndex + 1}/${Math.max(answerPages.length, 1)}`
-  // eslint-disable-next-line no-console
-  console.log(`[cue:state] mode=${currentMode} mic=${micOn ? 'on' : 'off'} stage=${tag} week1=${week1State} suggestions=${suggestions.length}`)
   await even.render(renderGlasses())
+}
+
+function refreshBatteryLevel(): void {
+  if (!even || batteryRefreshInFlight) return
+  batteryRefreshInFlight = true
+  void even.getBatteryLevel()
+    .then(level => {
+      cachedBatteryLevel = level
+      void paint()
+    })
+    .catch(() => {})
+    .finally(() => {
+      batteryRefreshInFlight = false
+    })
 }
 
 // --- mock-mode driver ---
@@ -659,7 +689,7 @@ async function showProactiveTopics(): Promise<void> {
 async function toggleMic(): Promise<void> {
   if (!agreedToPrivacy) return
   micOn = !micOn
-  appState = micOn ? 'active' : 'off'
+  appState = micOn ? 'waiting' : 'off'
   questionBuffer = ''
   answerPages = []
   answerPageIndex = 0
@@ -704,6 +734,36 @@ async function toggleMic(): Promise<void> {
   await paint()
 }
 
+async function startWaitingMic(): Promise<void> {
+  if (!agreedToPrivacy) return
+  if (micOn) {
+    appState = 'waiting'
+    await paint()
+    return
+  }
+
+  micOn = true
+  appState = 'waiting'
+  clearSessionState()
+  autoPausedReason = ''
+  lastTranscriptAt = Date.now()
+  lastChunkAt = Date.now()
+  sessionStartedAt = Date.now()
+  sessionSuggestionCount = 0
+  await paint()
+
+  if (isRealMode && transport && even) {
+    void startRealSession().catch(() => {
+      autoPausedReason = 'マイク起動に失敗しました'
+      void paint()
+    })
+  } else {
+    resetMock()
+    startMockTimer()
+  }
+  startMicTick()
+}
+
 function startMicTick(): void {
   stopMicTick()
   micTickTimer = window.setInterval(() => void micTick(), MIC_TICK_MS)
@@ -721,15 +781,13 @@ async function micTick(): Promise<void> {
   const now = Date.now()
   // Idle auto-pause: no non-empty transcript for idleAutoPauseMs.
   // 0 disables — user can opt out via phone settings.
-  if (idleAutoPauseMs > 0 && now - lastTranscriptAt > idleAutoPauseMs) {
+  if (appState !== 'waiting' && idleAutoPauseMs > 0 && now - lastTranscriptAt > idleAutoPauseMs) {
     autoPausedReason = `${Math.round(idleAutoPauseMs / 60_000)}分無音のため自動停止`
     await toggleMic() // turns mic off + repaints
     return
   }
   // Refresh battery cache (cheap — usually returns the pushed value).
-  if (even) {
-    try { cachedBatteryLevel = await even.getBatteryLevel() } catch { /* ignore */ }
-  }
+  refreshBatteryLevel()
   // Silence-driven suggestion trigger — sentence-final fires on transcript
   // arrival; this catches the case where the user simply stops talking.
   if (isRealMode) void maybeRequestSuggestions()
@@ -783,13 +841,34 @@ async function startRealSession(): Promise<void> {
 
 function onTranscriptFrame(e: TranscriptEvent): void {
   const detectedCommand = detectVoiceCommand(e.text)
-  if (detectedCommand) {
-    // eslint-disable-next-line no-console
-    console.log(`[cue:command] detected=${detectedCommand} text=${e.text}`)
+  if (
+    detectedCommand === 'end' &&
+    (appState === 'active' || appState === 'waiting' || appState === 'answer_display')
+  ) {
+    clearSessionState()
+    lastTranscriptAt = Date.now()
+    lastChunkAt = Date.now()
+    appState = 'waiting'
+    void paint()
+    return
   }
   if (appState === 'answer_display') {
     if (detectedCommand) {
       handleAnswerDisplayCommand(detectedCommand)
+      void paint()
+    }
+    return
+  }
+  if (appState === 'waiting') {
+    if (detectedCommand === 'start') {
+      appState = 'active'
+      questionBuffer = ''
+      answerPages = []
+      answerPageIndex = 0
+      suggestions = []
+      lastTranscript = '質問をどうぞ'
+      lastChunkAt = Date.now()
+      lastTranscriptAt = Date.now()
       void paint()
     }
     return
@@ -916,6 +995,7 @@ async function cycleMode(): Promise<void> {
 }
 
 function onTap(_src: InputSource): void {
+  if (!DEV_TAP_ENABLED) return
   if (!agreedToPrivacy) return // require phone-side opt-in first
   if (!micOn) {
     void toggleMic()
@@ -926,6 +1006,7 @@ function onTap(_src: InputSource): void {
 }
 
 function onDoubleTap(source: InputSource): void {
+  if (!DEV_TAP_ENABLED) return
   if (!agreedToPrivacy) {
     if (even) void even.exitApp()
     return
@@ -1074,9 +1155,8 @@ async function bootstrap(): Promise<void> {
   status.textContent = 'G2に接続中…'
   even = await connectEvenRuntime(`kanpe-g2 v${__APP_VERSION__}\n\n読み込み中…`)
 
-  if (even) {
-    setStorageBridge({ getStorage: even.getStorage, setStorage: even.setStorage })
-  }
+  if (!even) return
+  setStorageBridge({ getStorage: even.getStorage, setStorage: even.setStorage })
 
   // Hydrate state.
   agreedToPrivacy = await hasAgreedToPrivacy()
@@ -1132,9 +1212,10 @@ async function bootstrap(): Promise<void> {
   // One-shot battery read so the idle screen shows the glyph before the
   // first mic-tick. The tick keeps it fresh while mic is on; without this
   // call the battery glyph is invisible on every cold-start idle render.
-  try { cachedBatteryLevel = await even.getBatteryLevel() } catch { /* ignore */ }
+  refreshBatteryLevel()
 
   await paint()
+  if (agreedToPrivacy) void startWaitingMic()
 }
 
 void bootstrap().catch(err => {
