@@ -1,7 +1,7 @@
 // Cue personal Cloudflare Worker — proxies the glasses-to-Deepgram audio
 // stream + caches the rolling transcript so the LLM call can use it as
 // context. Each Cue user deploys their own Worker with their own
-// Deepgram + Anthropic / OpenAI keys; the plugin never sees the keys.
+// Deepgram + Anthropic + AI Search keys; the plugin never sees the keys.
 //
 // Endpoints:
 //   GET /ws?token=<bearer>      — WebSocket. Plugin sends raw 16kHz mono
@@ -14,35 +14,126 @@
 //                                 Auth: Authorization: Bearer <SHARED_SECRET>
 //                                 Returns { ok, suggestions: string[] }.
 //
+//   POST /ask                   — body { transcript, mode?, conditions? }
+//                                 Auth: Authorization: Bearer <SHARED_SECRET>
+//                                 Searches Cloudflare AI Search, injects
+//                                 chunks into Claude, returns { ok, answer }.
+//
 //   GET /healthz                — sanity check
 //
 // All cookies/keys live in Worker secrets, set via:
 //   wrangler secret put SHARED_SECRET
 //   wrangler secret put DEEPGRAM_API_KEY
-//   wrangler secret put ANTHROPIC_API_KEY      (or OPENAI_API_KEY)
+//   wrangler secret put ANTHROPIC_API_KEY
+//   wrangler secret put AISEARCH_TOKEN
+//   wrangler secret put CF_ACCOUNT_ID
 
 interface Env {
   SHARED_SECRET: string
   DEEPGRAM_API_KEY: string
-  ANTHROPIC_API_KEY?: string
-  OPENAI_API_KEY?: string
+  ANTHROPIC_API_KEY: string
+  AISEARCH_TOKEN: string
+  CF_ACCOUNT_ID: string
+  CLAUDE_MODEL?: string
+  CLAUDE_MAX_TOKENS?: string
+  AISEARCH_INSTANCE?: string
+  AISEARCH_MAX_RESULTS?: string
+  DEEPGRAM_MODEL?: string
 }
 
-// IMPORTANT: must be https:// not wss:// — Cloudflare Workers' fetch() only
-// accepts http(s) schemes for outbound WebSocket negotiation. The Upgrade
-// header on the request handles the protocol switch. Using wss:// here
-// produces a runtime TypeError ("Fetch API cannot load: wss://...") that
-// returns HTTP 500 to the client.
-const DEEPGRAM_WS = 'https://api.deepgram.com/v1/listen?model=nova-3&language=ja&interim_results=true&encoding=linear16&sample_rate=16000&channels=1'
-// Batch (HTTP) Deepgram endpoint used by /transcribe — same model, no
-// interim results since each call gets one chunk.
-//   diarize=true        → adds speaker:N per word (so plugin can tell
-//                          who is talking — wearer vs other person)
-//   utterances=true     → groups words into speaker turns with start/end
-//   smart_format=true   → cleaner punctuation, numbers, dates
-const DEEPGRAM_HTTP = 'https://api.deepgram.com/v1/listen?model=nova-3&language=ja&punctuate=true&diarize=true&utterances=true&smart_format=true'
-
 const SAMPLE_RATE = 16000
+const DEFAULT_CLAUDE_MODEL = 'claude-opus-4-7'
+const DEFAULT_CLAUDE_MAX_TOKENS = 2000
+const DEFAULT_AISEARCH_INSTANCE = 'soft-pond-d91c'
+const DEFAULT_AISEARCH_MAX_RESULTS = 8
+const DEFAULT_DEEPGRAM_MODEL = 'nova-3'
+
+interface AskBody {
+  mode?: string
+  transcript?: string
+  conditions?: string
+}
+
+interface SuggestBody {
+  mode?: string
+  transcript?: string
+  customPrompt?: string
+  recentSuggestions?: string[]
+}
+
+interface AiSearchChunk {
+  id: string
+  text: string
+  source: string
+  score: number
+  metadata: Record<string, unknown>
+}
+
+interface AiSearchApiChunk {
+  id?: string
+  text?: string
+  score?: number
+  type?: string
+  item?: {
+    key?: string
+    metadata?: Record<string, unknown>
+    timestamp?: number
+  }
+  scoring_details?: Record<string, unknown>
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback
+  const n = Number.parseInt(value, 10)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+function claudeModel(env: Env): string {
+  return env.CLAUDE_MODEL?.trim() || DEFAULT_CLAUDE_MODEL
+}
+
+function claudeMaxTokens(env: Env): number {
+  return parsePositiveInt(env.CLAUDE_MAX_TOKENS, DEFAULT_CLAUDE_MAX_TOKENS)
+}
+
+function aiSearchInstance(env: Env): string {
+  return env.AISEARCH_INSTANCE?.trim() || DEFAULT_AISEARCH_INSTANCE
+}
+
+function aiSearchMaxResults(env: Env): number {
+  return parsePositiveInt(env.AISEARCH_MAX_RESULTS, DEFAULT_AISEARCH_MAX_RESULTS)
+}
+
+function deepgramModel(env: Env): string {
+  return env.DEEPGRAM_MODEL?.trim() || DEFAULT_DEEPGRAM_MODEL
+}
+
+function buildDeepgramWsUrl(env: Env): string {
+  // IMPORTANT: must be https:// not wss:// — Cloudflare Workers' fetch() only
+  // accepts http(s) schemes for outbound WebSocket negotiation.
+  const params = new URLSearchParams({
+    model: deepgramModel(env),
+    language: 'ja',
+    interim_results: 'true',
+    encoding: 'linear16',
+    sample_rate: '16000',
+    channels: '1',
+  })
+  return `https://api.deepgram.com/v1/listen?${params.toString()}`
+}
+
+function buildDeepgramHttpUrl(env: Env): string {
+  // Batch endpoint used by /transcribe; no interim results per chunk.
+  const params = new URLSearchParams({
+    model: deepgramModel(env),
+    language: 'ja',
+    punctuate: 'true',
+    diarize: 'true',
+    utterances: 'true',
+    smart_format: 'true',
+  })
+  return `https://api.deepgram.com/v1/listen?${params.toString()}`
+}
 
 // WAV-wrap raw PCM16 mono so Deepgram's HTTP endpoint (which sniffs the
 // container) accepts it. Same shape used by typical clients.
@@ -105,7 +196,7 @@ async function handleTranscribe(request: Request, env: Env): Promise<Response> {
     return jsonResponse(200, { ok: true, text: '' })
   }
   const wav = wavWrap(pcm)
-  const dgRes = await fetch(DEEPGRAM_HTTP, {
+  const dgRes = await fetch(buildDeepgramHttpUrl(env), {
     method: 'POST',
     headers: {
       Authorization: `Token ${env.DEEPGRAM_API_KEY}`,
@@ -152,20 +243,163 @@ function jsonResponse(status: number, body: unknown): Response {
   })
 }
 
-async function handleSuggest(request: Request, env: Env): Promise<Response> {
-  if (request.method !== 'POST') return jsonResponse(405, { ok: false, error: 'POST only' })
+function isAuthorized(request: Request, env: Env): boolean {
   const auth = request.headers.get('Authorization') ?? ''
-  if (!env.SHARED_SECRET || auth !== `Bearer ${env.SHARED_SECRET}`) {
+  return !!env.SHARED_SECRET && auth === `Bearer ${env.SHARED_SECRET}`
+}
+
+function requireAnthropicKey(env: Env): string | Response {
+  if (!env.ANTHROPIC_API_KEY) {
+    return jsonResponse(500, { ok: false, error: 'ANTHROPIC_API_KEY not configured' })
+  }
+  return env.ANTHROPIC_API_KEY
+}
+
+function cleanAiSearchText(text: string): string {
+  return text
+    .replace(/<div\b[^>]*>\s*<img\b[^>]*\/?>\s*<\/div>/gi, ' ')
+    .replace(/<img\b[^>]*\/?>/gi, ' ')
+    .replace(/---\s*Page\s+\d+\s*---/gi, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+async function searchAiSearch(env: Env, query: string): Promise<AiSearchChunk[]> {
+  if (!env.AISEARCH_TOKEN) throw new Error('AISEARCH_TOKEN not configured')
+  if (!env.CF_ACCOUNT_ID) throw new Error('CF_ACCOUNT_ID not configured')
+
+  const accountId = encodeURIComponent(env.CF_ACCOUNT_ID)
+  const instance = encodeURIComponent(aiSearchInstance(env))
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-search/instances/${instance}/search`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.AISEARCH_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      query,
+      ai_search_options: {
+        retrieval: {
+          retrieval_type: 'hybrid',
+          max_num_results: aiSearchMaxResults(env),
+        },
+      },
+    }),
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`AI Search HTTP ${res.status}: ${text.slice(0, 200)}`)
+  }
+  const json = JSON.parse(text) as {
+    success?: boolean
+    errors?: Array<{ message?: string }>
+    result?: {
+      chunks?: AiSearchApiChunk[]
+      search_query?: string
+    }
+  }
+  if (json.success === false) {
+    const msg = json.errors?.map(e => e.message).filter(Boolean).join('; ') || 'AI Search request failed'
+    throw new Error(msg)
+  }
+  return (json.result?.chunks ?? [])
+    .map(chunk => {
+      const cleaned = cleanAiSearchText(chunk.text ?? '')
+      return {
+        id: chunk.id ?? '',
+        text: cleaned,
+        source: chunk.item?.key ?? 'unknown',
+        score: typeof chunk.score === 'number' ? chunk.score : 0,
+        metadata: chunk.item?.metadata ?? {},
+      }
+    })
+    .filter(chunk => chunk.text.length > 0)
+}
+
+function formatChunksForPrompt(chunks: AiSearchChunk[]): string {
+  if (chunks.length === 0) return '検索結果なし。'
+  return chunks.map((chunk, i) => {
+    return [
+      `【資料${i + 1}】`,
+      `出典: ${chunk.source}`,
+      `score: ${chunk.score}`,
+      chunk.text,
+    ].join('\n')
+  }).join('\n\n')
+}
+
+function askSystemPrompt(): string {
+  return [
+    'あなたは、アップロードされた資料の分野の専門家として回答する日本語アシスタントです。',
+    '以下の資料検索結果とユーザーの質問を読み、HUDで読みやすい日本語で直接回答してください。',
+    '特定分野名を事前に決め打ちせず、資料内の用語・定義・手順・論理を優先してください。',
+    '資料に基づく回答では、文中または文末に「（ファイル名 より）」の形で出典を明示してください。',
+    '資料の手順や定義を使って推論・計算する場合は「（資料に基づく試算）」と明示し、計算過程を簡潔に示してください。',
+    '検索結果が質問に関連しない場合は、冒頭に「【資料外の一般情報】」を付け、断定しすぎないでください。',
+    '確実な根拠がない場合は無理に答えず、「資料にない」または「資料での確認が必要」と明示してください。',
+    '複数チャンクを組み合わせ、質問の前提・関連概念も資料から拾って論理的に構成してください。',
+    '資料にない内容で補わないでください。補足する場合は資料外であることを明示してください。',
+    '前置きや挨拶は不要です。答えから入ってください。',
+  ].join('\n')
+}
+
+function askUserMessage(question: string, chunks: AiSearchChunk[], conditions?: string): string {
+  const conditionBlock = conditions?.trim()
+    ? `\n\n【条件セッション（将来拡張用）】\n${conditions.trim()}`
+    : ''
+  return [
+    '【ユーザーの質問】',
+    question,
+    conditionBlock,
+    '',
+    '【AI Search 検索結果】',
+    formatChunksForPrompt(chunks),
+    '',
+    '上記資料検索結果に基づいて回答してください。',
+  ].join('\n')
+}
+
+async function handleAsk(request: Request, env: Env): Promise<Response> {
+  if (request.method !== 'POST') return jsonResponse(405, { ok: false, error: 'POST only' })
+  if (!isAuthorized(request, env)) {
     return jsonResponse(401, { ok: false, error: 'unauthorized' })
   }
-  let body: {
-    mode?: string
-    transcript?: string
-    customPrompt?: string
-    recentSuggestions?: string[]
-  }
+  let body: AskBody
   try {
-    body = (await request.json()) as typeof body
+    body = (await request.json()) as AskBody
+  } catch {
+    return jsonResponse(400, { ok: false, error: 'invalid JSON body' })
+  }
+  if (!body.transcript || typeof body.transcript !== 'string') {
+    return jsonResponse(400, { ok: false, error: 'transcript required' })
+  }
+  const apiKey = requireAnthropicKey(env)
+  if (apiKey instanceof Response) return apiKey
+  try {
+    const chunks = await searchAiSearch(env, body.transcript)
+    const answer = await callAnthropicText(
+      env,
+      apiKey,
+      askSystemPrompt(),
+      askUserMessage(body.transcript, chunks, body.conditions),
+    )
+    return jsonResponse(200, { ok: true, answer, chunks: chunks.map(c => ({ source: c.source, score: c.score })) })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return jsonResponse(500, { ok: false, error: msg.slice(0, 200) })
+  }
+}
+
+async function handleSuggest(request: Request, env: Env): Promise<Response> {
+  if (request.method !== 'POST') return jsonResponse(405, { ok: false, error: 'POST only' })
+  if (!isAuthorized(request, env)) {
+    return jsonResponse(401, { ok: false, error: 'unauthorized' })
+  }
+  let body: SuggestBody
+  try {
+    body = (await request.json()) as SuggestBody
   } catch {
     return jsonResponse(400, { ok: false, error: 'invalid JSON body' })
   }
@@ -182,14 +416,9 @@ async function handleSuggest(request: Request, env: Env): Promise<Response> {
     : ''
   const systemPrompt = baseSystem + dedupeNote
 
-  // Anthropic-first; OpenAI fallback if no Anthropic key is set.
-  if (env.ANTHROPIC_API_KEY) {
-    return await callAnthropic(env.ANTHROPIC_API_KEY, systemPrompt, body.transcript)
-  }
-  if (env.OPENAI_API_KEY) {
-    return await callOpenAI(env.OPENAI_API_KEY, systemPrompt, body.transcript)
-  }
-  return jsonResponse(500, { ok: false, error: 'no LLM API key configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)' })
+  const apiKey = requireAnthropicKey(env)
+  if (apiKey instanceof Response) return apiKey
+  return await callAnthropicSuggest(env, apiKey, systemPrompt, body.transcript)
 }
 
 function systemPromptForMode(mode: string): string {
@@ -216,11 +445,12 @@ function systemPromptForMode(mode: string): string {
   return PROMPTS[mode] ?? PROMPTS.date!
 }
 
-async function callAnthropic(
+async function callAnthropicText(
+  env: Env,
   apiKey: string,
   systemPrompt: string,
-  transcript: string,
-): Promise<Response> {
+  userContent: string,
+): Promise<string> {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -229,56 +459,54 @@ async function callAnthropic(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'claude-opus-4-7',
-      max_tokens: 500,
+      model: claudeModel(env),
+      max_tokens: claudeMaxTokens(env),
       system: systemPrompt,
       messages: [
         {
           role: 'user',
-          content: `以下はユーザーからの質問です。\n\n"${transcript}"\n\nこの質問に対して、専門用語を正確に保ちながら日本語で直接回答してください。`,
+          content: userContent,
         },
       ],
     }),
   })
   if (!res.ok) {
     const text = await res.text()
-    return jsonResponse(res.status, { ok: false, error: `anthropic ${res.status}: ${text.slice(0, 200)}` })
+    throw new Error(`anthropic ${res.status}: ${text.slice(0, 200)}`)
   }
   const json = (await res.json()) as { content?: Array<{ text?: string }> }
-  const text = json.content?.[0]?.text ?? ''
-  return jsonResponse(200, { ok: true, suggestions: parseNumberedList(text) })
+  return json.content?.[0]?.text ?? ''
 }
 
-async function callOpenAI(
+function anthropicStatusFromError(message: string): number {
+  const m = message.match(/^anthropic (\d+):/)
+  if (!m?.[1]) return 500
+  const status = Number.parseInt(m[1], 10)
+  return Number.isFinite(status) ? status : 500
+}
+
+function anthropicErrorResponse(err: unknown): Response {
+  const msg = err instanceof Error ? err.message : String(err)
+  return jsonResponse(anthropicStatusFromError(msg), { ok: false, error: msg.slice(0, 200) })
+}
+
+async function callAnthropicSuggest(
+  env: Env,
   apiKey: string,
   systemPrompt: string,
   transcript: string,
 ): Promise<Response> {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      max_tokens: 200,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        {
-          role: 'user',
-          content: `Recent conversation transcript:\n\n"${transcript}"\n\nSuggestions:`,
-        },
-      ],
-    }),
-  })
-  if (!res.ok) {
-    const text = await res.text()
-    return jsonResponse(res.status, { ok: false, error: `openai ${res.status}: ${text.slice(0, 200)}` })
+  try {
+    const text = await callAnthropicText(
+      env,
+      apiKey,
+      systemPrompt,
+      `以下はユーザーからの質問です。\n\n"${transcript}"\n\nこの質問に対して、専門用語を正確に保ちながら日本語で直接回答してください。`,
+    )
+    return jsonResponse(200, { ok: true, suggestions: parseNumberedList(text) })
+  } catch (err) {
+    return anthropicErrorResponse(err)
   }
-  const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> }
-  const text = json.choices?.[0]?.message?.content ?? ''
-  return jsonResponse(200, { ok: true, suggestions: parseNumberedList(text) })
 }
 
 // Parse "1. foo\n2. bar\n3. baz" into ["foo", "bar", "baz"]. Tolerates
@@ -310,7 +538,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   // Open a WebSocket to Deepgram and pipe frames in both directions.
   // Workers' fetch() supports outbound WS; WebSocketPair gives us the
   // pair to hand back to the client.
-  const dgRes = await fetch(DEEPGRAM_WS, {
+  const dgRes = await fetch(buildDeepgramWsUrl(env), {
     headers: {
       Authorization: `Token ${env.DEEPGRAM_API_KEY}`,
       Upgrade: 'websocket',
@@ -375,6 +603,7 @@ export default {
     }
     const url = new URL(request.url)
     if (url.pathname === '/healthz') return jsonResponse(200, { ok: true })
+    if (url.pathname === '/ask') return handleAsk(request, env)
     if (url.pathname === '/suggest') return handleSuggest(request, env)
     if (url.pathname === '/transcribe') return handleTranscribe(request, env)
     if (url.pathname === '/ws') return handleWebSocket(request, env)
