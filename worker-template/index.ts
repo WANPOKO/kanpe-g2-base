@@ -28,6 +28,8 @@
 //   wrangler secret put AISEARCH_TOKEN
 //   wrangler secret put CF_ACCOUNT_ID
 
+import { correctRecognizedText } from '../src/termCorrection'
+
 interface Env {
   SHARED_SECRET: string
   DEEPGRAM_API_KEY: string
@@ -39,6 +41,7 @@ interface Env {
   AISEARCH_INSTANCE?: string
   AISEARCH_MAX_RESULTS?: string
   DEEPGRAM_MODEL?: string
+  KEYTERMS?: string
 }
 
 const SAMPLE_RATE = 16000
@@ -47,6 +50,7 @@ const DEFAULT_CLAUDE_MAX_TOKENS = 2000
 const DEFAULT_AISEARCH_INSTANCE = 'soft-pond-d91c'
 const DEFAULT_AISEARCH_MAX_RESULTS = 8
 const DEFAULT_DEEPGRAM_MODEL = 'nova-3'
+const MAX_DEEPGRAM_KEYTERMS = 100
 
 interface AskBody {
   mode?: string
@@ -108,6 +112,21 @@ function deepgramModel(env: Env): string {
   return env.DEEPGRAM_MODEL?.trim() || DEFAULT_DEEPGRAM_MODEL
 }
 
+function deepgramKeyterms(env: Env): string[] {
+  if (!env.KEYTERMS) return []
+  return env.KEYTERMS
+    .split(',')
+    .map(term => term.trim())
+    .filter(term => term.length > 0)
+    .slice(0, MAX_DEEPGRAM_KEYTERMS)
+}
+
+function appendDeepgramKeyterms(params: URLSearchParams, env: Env): void {
+  for (const term of deepgramKeyterms(env)) {
+    params.append('keyterm', term)
+  }
+}
+
 function buildDeepgramWsUrl(env: Env): string {
   // IMPORTANT: must be https:// not wss:// — Cloudflare Workers' fetch() only
   // accepts http(s) schemes for outbound WebSocket negotiation.
@@ -119,6 +138,7 @@ function buildDeepgramWsUrl(env: Env): string {
     sample_rate: '16000',
     channels: '1',
   })
+  appendDeepgramKeyterms(params, env)
   return `https://api.deepgram.com/v1/listen?${params.toString()}`
 }
 
@@ -132,6 +152,7 @@ function buildDeepgramHttpUrl(env: Env): string {
     utterances: 'true',
     smart_format: 'true',
   })
+  appendDeepgramKeyterms(params, env)
   return `https://api.deepgram.com/v1/listen?${params.toString()}`
 }
 
@@ -341,6 +362,8 @@ function askSystemPrompt(): string {
     '確実な根拠がない場合は無理に答えず、「資料にない」または「資料での確認が必要」と明示してください。',
     '複数チャンクを組み合わせ、質問の前提・関連概念も資料から拾って論理的に構成してください。',
     '資料にない内容で補わないでください。補足する場合は資料外であることを明示してください。',
+    'Markdown記法は使わないでください。#や##の見出し、**強調**、-や*の箇条書き記号は出力しないでください。',
+    '見出しが必要な場合は「【見出し】」のように全角かっこで囲み、本文はプレーンテキストで書いてください。',
     '前置きや挨拶は不要です。答えから入ってください。',
   ].join('\n')
 }
@@ -378,14 +401,22 @@ async function handleAsk(request: Request, env: Env): Promise<Response> {
   const apiKey = requireAnthropicKey(env)
   if (apiKey instanceof Response) return apiKey
   try {
-    const chunks = await searchAiSearch(env, body.transcript)
+    const correction = correctRecognizedText(body.transcript)
+    const question = correction.correctedText
+    const chunks = await searchAiSearch(env, question)
     const answer = await callAnthropicText(
       env,
       apiKey,
       askSystemPrompt(),
-      askUserMessage(body.transcript, chunks, body.conditions),
+      askUserMessage(question, chunks, body.conditions),
     )
-    return jsonResponse(200, { ok: true, answer, chunks: chunks.map(c => ({ source: c.source, score: c.score })) })
+    return jsonResponse(200, {
+      ok: true,
+      answer,
+      correctedQuestion: question,
+      corrections: correction.corrections,
+      chunks: chunks.map(c => ({ source: c.source, score: c.score })),
+    })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return jsonResponse(500, { ok: false, error: msg.slice(0, 200) })

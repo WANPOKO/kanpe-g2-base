@@ -9,6 +9,7 @@ CLAUDE_MAX_TOKENS = "2000"
 AISEARCH_INSTANCE = "soft-pond-d91c"
 AISEARCH_MAX_RESULTS = "8"
 DEEPGRAM_MODEL = "nova-3"
+KEYTERMS = "事情補正,鑑定評価,取引事例,正常価格,原価法,取引事例比較法,収益還元法,時点修正,地域要因,個別的要因,最有効使用,還元利回り,収益価格,比準価格,積算価格"
 
 # Set via wrangler secret (NOT in this file):
 #   wrangler secret put SHARED_SECRET
