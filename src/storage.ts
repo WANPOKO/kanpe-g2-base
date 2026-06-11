@@ -2,6 +2,7 @@
 // browser-localStorage fallback for the dev preview. Same pattern as Glance.
 
 import type { ModeId } from './modes'
+import { clampMicGain, DEFAULT_MIC_GAIN } from './audio'
 
 interface BridgeStorageLike {
   getStorage: (key: string) => Promise<string>
@@ -44,6 +45,7 @@ const KEY_CUSTOM_PROMPT = 'cue:custom-prompt:v1'
 const KEY_WORKER_URL = 'cue:worker-url:v1'
 const KEY_WORKER_TOKEN = 'cue:worker-token:v1'
 const KEY_IDLE_AUTO_PAUSE_MIN = 'cue:idle-auto-pause-min:v1'
+const KEY_MIC_GAIN = 'cue:mic-gain:v1'
 // v0.4.0: show the diagnostic stats line on glasses (audio frames /
 // chunks / errors). Default OFF — only meant for active debugging.
 const KEY_SHOW_DEBUG_OVERLAY = 'cue:show-debug-overlay:v1'
@@ -111,6 +113,17 @@ export async function getIdleAutoPauseMin(): Promise<number> {
 export async function setIdleAutoPauseMin(min: number): Promise<void> {
   const n = Math.max(0, Math.floor(min))
   await writeRaw(KEY_IDLE_AUTO_PAUSE_MIN, String(n))
+}
+
+export async function getMicGain(): Promise<number> {
+  const raw = await readRaw(KEY_MIC_GAIN)
+  if (raw === null) return DEFAULT_MIC_GAIN
+  const n = Number.parseFloat(raw)
+  return clampMicGain(n)
+}
+
+export async function setMicGain(gain: number): Promise<void> {
+  await writeRaw(KEY_MIC_GAIN, String(clampMicGain(gain)))
 }
 
 export async function getShowDebugOverlay(): Promise<boolean> {

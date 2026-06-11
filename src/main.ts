@@ -2,6 +2,7 @@
 //
 // See ~/Documents/Pulse/ROADMAP.md § "Plan: Cue" for the full plan.
 
+import { applyPcm16Gain, clampMicGain, DEFAULT_MIC_GAIN } from './audio'
 import { connectEvenRuntime, type EvenRuntime, type InputSource, type SwipeDir } from './even'
 import { DEFAULT_MODE, MODES, type Mode, type ModeId, modeById, nextMode } from './modes'
 import { nextMockExchange, nextMockProactiveTopics, resetMock } from './mock'
@@ -10,6 +11,7 @@ import {
   DEFAULT_WEARER_SPEAKER_ID,
   getCustomPrompt,
   getIdleAutoPauseMin,
+  getMicGain,
   getMode,
   getShowDebugOverlay,
   getWearerSpeakerId,
@@ -18,6 +20,7 @@ import {
   hasAgreedToPrivacy,
   setCustomPrompt,
   setIdleAutoPauseMin,
+  setMicGain,
   setMode,
   setPrivacyAgreed,
   clearSessionHistory,
@@ -29,6 +32,7 @@ import {
   setWorkerToken,
   setWorkerUrl,
 } from './storage'
+import { correctRecognizedText, type AppliedCorrection } from './termCorrection'
 import { createTransport, setTransportLogger, type CueFetchLog, type CueTransport, type TranscriptEvent } from './transport'
 import {
   appendTurn,
@@ -39,6 +43,7 @@ import {
   wrapWords,
   type ConversationTurn,
 } from './utterance'
+import { DEFAULT_VOICE_COMMANDS, type CommandType, type VoiceCommand } from './voiceCommands'
 
 // --- module state ---
 
@@ -46,22 +51,7 @@ let even: EvenRuntime | null = null
 let currentMode: ModeId = DEFAULT_MODE
 let micOn = false
 
-type AppState = 'off' | 'waiting' | 'active' | 'processing' | 'answer_display'
-type CommandType = 'start' | 'end' | 'next' | 'prev' | 'repeat' | 'finish'
-
-type VoiceCommand = {
-  type: CommandType
-  phrases: string[]
-}
-
-const DEFAULT_VOICE_COMMANDS: readonly VoiceCommand[] = [
-  { type: 'start', phrases: ['では確認しましょう'] },
-  { type: 'end', phrases: ['ありがとうございました'] },
-  { type: 'next', phrases: ['次'] },
-  { type: 'prev', phrases: ['戻って'] },
-  { type: 'repeat', phrases: ['もう一度'] },
-  { type: 'finish', phrases: ['終わり'] },
-]
+type AppState = 'off' | 'waiting' | 'active' | 'question_confirm' | 'processing' | 'answer_display'
 
 function normalizeCommandText(text: string): string {
   return text
@@ -136,9 +126,17 @@ function splitAnswerPages(text: string, maxChars = MAX_CHARS_PER_ANSWER_PAGE): s
 
 function clearSessionState(): void {
   questionBuffer = ''
+  pendingQuestion = ''
+  pendingQuestionOriginal = ''
+  pendingQuestionCorrections = []
   answerPages = []
   answerPageIndex = 0
   suggestions = []
+  clearQuestionInputState()
+}
+
+function clearQuestionInputState(): void {
+  questionBuffer = ''
   liveTranscript = ''
   lastTranscript = ''
   proactiveActive = false
@@ -158,17 +156,25 @@ function handleAnswerDisplayCommand(command: CommandType): boolean {
     case 'finish':
       answerPages = []
       answerPageIndex = 0
-      questionBuffer = ''
+      suggestions = []
+      clearQuestionInputState()
+      lastTranscriptAt = Date.now()
+      lastChunkAt = Date.now()
       appState = 'active'
       return true
     case 'start':
     case 'end':
+    case 'confirm':
+    case 'retry':
       return false
   }
 }
 
 let appState: AppState = 'off'
 let questionBuffer = ''
+let pendingQuestion = ''
+let pendingQuestionOriginal = ''
+let pendingQuestionCorrections: AppliedCorrection[] = []
 let answerPages: string[] = []
 let answerPageIndex = 0
 
@@ -201,6 +207,9 @@ const DEV_TAP_ENABLED = true
 // Auto-pause after this much idle. Idle = no non-empty transcript chunk.
 // 0 disables. Sourced from phone settings on bootstrap; falls back to default.
 let idleAutoPauseMs = DEFAULT_IDLE_AUTO_PAUSE_MIN * 60_000
+// Configured gain for the next mic session. startRealSession snapshots this
+// value so changing settings does not alter an already-running mic stream.
+let micGain = DEFAULT_MIC_GAIN
 
 let transport: CueTransport | null = null
 let isRealMode = false // true when transport.ready (Worker configured)
@@ -340,6 +349,10 @@ root.innerHTML = `
         <button id="save-idle" type="button" style="padding: .35rem .7rem; cursor: pointer; max-width: 200px;">保存</button>
         <p id="idle-status" style="color: #2a2; font-size: .85em; min-height: 1.2em; margin: 0;"></p>
 
+        <label>マイクゲイン（0.5〜10.0） <input id="mic-gain" type="number" min="0.5" max="10" step="0.1" style="padding: .35rem; width: 6em; box-sizing: border-box;" /></label>
+        <button id="save-mic-gain" type="button" style="padding: .35rem .7rem; cursor: pointer; max-width: 200px;">保存</button>
+        <p id="mic-gain-status" style="color: #2a2; font-size: .85em; min-height: 1.2em; margin: 0;"></p>
+
         <hr style="border: 0; border-top: 1px solid #eee; margin: .5rem 0;" />
 
         <label style="display: flex; align-items: center; gap: .5rem; cursor: pointer;">
@@ -425,6 +438,9 @@ const privacyDecline = document.querySelector<HTMLButtonElement>('#privacy-decli
 const idleAutoPauseInput = document.querySelector<HTMLInputElement>('#idle-auto-pause-min')!
 const saveIdleBtn = document.querySelector<HTMLButtonElement>('#save-idle')!
 const idleStatus = document.querySelector<HTMLParagraphElement>('#idle-status')!
+const micGainInput = document.querySelector<HTMLInputElement>('#mic-gain')!
+const saveMicGainBtn = document.querySelector<HTMLButtonElement>('#save-mic-gain')!
+const micGainStatus = document.querySelector<HTMLParagraphElement>('#mic-gain-status')!
 const showDebugOverlayInput = document.querySelector<HTMLInputElement>('#show-debug-overlay')!
 const wearerSpeakerSelect = document.querySelector<HTMLSelectElement>('#wearer-speaker-id')!
 const wearerStatus = document.querySelector<HTMLParagraphElement>('#wearer-status')!
@@ -530,6 +546,25 @@ function renderAnswerDisplay(): string {
   ].join('\n')
 }
 
+function renderQuestionConfirm(): string {
+  const questionLines = wrapWords(`Q: ${pendingQuestion || '（質問なし）'}`, LINE_WIDTH, 5)
+  const lines = [
+    '質問確認',
+    '',
+    ...questionLines,
+  ]
+  if (pendingQuestionCorrections.length > 0) {
+    const correctionText = pendingQuestionCorrections.map(c => `${c.from}→${c.to}`).join(' / ')
+    lines.push('')
+    lines.push(trunc(`補正: ${correctionText}`, 76))
+    lines.push(trunc(`元: ${pendingQuestionOriginal}`, 76))
+  }
+  lines.push('')
+  lines.push('この内容で回答を作成しますか')
+  lines.push('うん / やり直し')
+  return lines.join('\n')
+}
+
 function renderGlasses(): string {
   const mode: Mode = modeById(currentMode)
   const micGlyph = micOn ? '●' : '○'
@@ -565,6 +600,7 @@ function renderGlasses(): string {
     return idleLines.join('\n')
   }
   if (appState === 'answer_display') return renderAnswerDisplay()
+  if (appState === 'question_confirm') return renderQuestionConfirm()
   // Live view.
   const lines: string[] = [header, '']
   // v0.4.0: render up to MAX_DISPLAYED_TURNS of the rolling conversation
@@ -797,8 +833,9 @@ async function startRealSession(): Promise<void> {
   }
   // Ask the SDK to start the mic. PCM frames flow into transport via
   // sendAudioFrame; transport buffers and POSTs every CHUNK_MS.
+  const sessionMicGain = micGain
   const ok = await even.startMic(frame => {
-    transport?.sendAudioFrame(frame)
+    transport?.sendAudioFrame(applyPcm16Gain(frame, sessionMicGain))
   })
   if (!ok) {
     lastTranscript = '（マイク許可がありません）'
@@ -817,7 +854,12 @@ function onTranscriptFrame(e: TranscriptEvent): void {
   const detectedCommand = detectVoiceCommand(e.text)
   if (
     detectedCommand === 'end' &&
-    (appState === 'active' || appState === 'waiting' || appState === 'answer_display')
+    (
+      appState === 'active' ||
+      appState === 'waiting' ||
+      appState === 'question_confirm' ||
+      appState === 'answer_display'
+    )
   ) {
     clearSessionState()
     lastTranscriptAt = Date.now()
@@ -833,10 +875,28 @@ function onTranscriptFrame(e: TranscriptEvent): void {
     }
     return
   }
+  if (appState === 'question_confirm') {
+    if (detectedCommand === 'confirm') {
+      void requestAnswerForQuestion(pendingQuestion)
+      return
+    }
+    if (detectedCommand === 'retry') {
+      pendingQuestion = ''
+      pendingQuestionOriginal = ''
+      pendingQuestionCorrections = []
+      clearQuestionInputState()
+      lastChunkAt = Date.now()
+      lastTranscriptAt = Date.now()
+      appState = 'active'
+      void paint()
+      return
+    }
+    return
+  }
   if (appState === 'waiting') {
     if (detectedCommand === 'start') {
       appState = 'active'
-      questionBuffer = ''
+      clearQuestionInputState()
       answerPages = []
       answerPageIndex = 0
       suggestions = []
@@ -916,12 +976,30 @@ async function maybeRequestSuggestions(): Promise<void> {
   if (!question) return
   if (Date.now() - lastChunkAt < QUESTION_SILENCE_MS) return
 
+  const correction = correctRecognizedText(question)
+  pendingQuestion = correction.correctedText.trim()
+  pendingQuestionOriginal = correction.originalText
+  pendingQuestionCorrections = correction.corrections
+  clearQuestionInputState()
+  if (!pendingQuestion) return
+  appState = 'question_confirm'
+  await paint()
+}
+
+async function requestAnswerForQuestion(question: string): Promise<void> {
+  if (!transport || !isRealMode) return
+  if (suggestionInFlight) return
+  const correction = correctRecognizedText(question.trim())
+  const correctedQuestion = correction.correctedText.trim()
+  if (!correctedQuestion) return
+
   appState = 'processing'
   suggestionInFlight = true
+  clearQuestionInputState()
   try {
     const result = await transport.requestAsk({
       mode: currentMode,
-      transcript: question,
+      transcript: correctedQuestion,
     })
     if (result.ok) {
       const answerText = result.answer.trim()
@@ -940,6 +1018,9 @@ async function maybeRequestSuggestions(): Promise<void> {
   } finally {
     suggestionInFlight = false
     questionBuffer = ''
+    pendingQuestion = ''
+    pendingQuestionOriginal = ''
+    pendingQuestionCorrections = []
     if (appState === 'processing') appState = micOn ? 'active' : 'off'
   }
 }
@@ -1053,6 +1134,19 @@ saveIdleBtn.addEventListener('click', async () => {
   window.setTimeout(() => { idleStatus.textContent = '' }, 4000)
 })
 
+saveMicGainBtn.addEventListener('click', async () => {
+  const raw = Number.parseFloat(micGainInput.value)
+  const gain = clampMicGain(raw)
+  await setMicGain(gain)
+  micGain = gain
+  micGainInput.value = String(gain)
+  micGainStatus.style.color = '#2a2'
+  micGainStatus.textContent = micOn
+    ? `保存しました。次回マイク開始時から ${gain}x で送信します。`
+    : `保存しました。${gain}x で送信します。`
+  window.setTimeout(() => { micGainStatus.textContent = '' }, 4000)
+})
+
 saveWorkerBtn.addEventListener('click', async () => {
   await setWorkerUrl(workerUrlInput.value)
   await setWorkerToken(workerTokenInput.value)
@@ -1103,6 +1197,8 @@ async function bootstrap(): Promise<void> {
   const idleMin = await getIdleAutoPauseMin()
   idleAutoPauseInput.value = String(idleMin)
   idleAutoPauseMs = idleMin * 60_000
+  micGain = await getMicGain()
+  micGainInput.value = String(micGain)
   // Hydrate v0.4.0 toggles.
   showDebugOverlay = await getShowDebugOverlay()
   showDebugOverlayInput.checked = showDebugOverlay
